@@ -49,6 +49,8 @@ Sleep, 5000
 ;如果检测到EXE程序正在运行则激活该程序为活动窗口
 if WinExist("ahk_exe ComeOn.exe")
 WinActivate
+;按下热键ALT+M
+send, !M
 */
 ;退出程序
 ExitApp
