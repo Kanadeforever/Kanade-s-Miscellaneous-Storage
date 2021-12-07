@@ -45,30 +45,37 @@ Gui Add, Text, x160 y304 w651 h23 +0x200, 修改INI时将里面第一行等号�
 
 Return
 
-; 变量部分
+;变量具体代码
 btnOriginal:
 
 	WinMinimize						; 最小化窗口
 
-		Runwait ".\ComeOn.exe"				; 运行程序（Run为直接运行，RunWait为运行后等待进程结束再进行下一步）
-/*
+		;Runwait ".\ComeOn.exe"				; 运行程序（Run为直接运行，RunWait为运行后等待进程结束再进行下一步）
+; /*
 		SetTimer, RunMagpie, -1				; 设置计时器，跳转RunMagpie子进程，即时进行
 
 			Sleep, 5000				; 等待5秒
 
-		if WinExist("ahk_exe ComeOn.exe")		; 如果检测到EXE程序正在运行则激活该程序为活动窗口
-			WinActivate
+		if WinExist("ahk_exe ComeOn.exe")		; 如果检测到EXE程序正在运行
+		   WinActivate, ComeOn.exe			; 则激活ComeOn.exe为活动窗口
 
 		SetTimer, MagpieScaling, 5000			; 设置计时器，跳转MagpieScaling子进程，5秒后执行
-*/
+; */
+		Process, Exist, ComeOn.exe			; 检测是否存在ComeOn.exe进程
+
+		if (ErrorLevel = 0)				; 如果ErrorLevel为0
+
+		{
+			Process, Close, Magpie.exe		; 结束Magpie.exe进程
+		}
 
 ExitApp								; 退出程序
 
 RunMagpie:
 
-	Run, ".\Magpie\Magpie.exe",, Min			; 最小化运行Magpie
+	Run, ".\Magpie\Magpie.exe",, Min			; 最小化运行Magpie.exe
 
-Return								; 返回父进程
+Return
 
 MagpieScaling:
 
@@ -78,7 +85,6 @@ MagpieScaling:
 	Send {ALT Up} 						; 抬起A键
 
 Return
-
 
 btn480P:
 
