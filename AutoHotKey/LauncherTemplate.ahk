@@ -41,36 +41,36 @@ Return
 ; 变量具体代码
 btnOriginal:
 ; 最小化窗口
-WinMinimize
+  WinMinimize
 ; 运行程序（Run为直接运行，RunWait为运行后等待进程结束再进行下一步）
-Runwait ".\ComeOn.exe"
+    Runwait ".\ComeOn.exe"
 /*
 ; 等待5秒
-Sleep, 5000
+  Sleep, 5000
 ; 如果检测到EXE程序正在运行则激活该程序为活动窗口
-if WinExist("ahk_exe ComeOn.exe")
-WinActivate
+    if WinExist("ahk_exe ComeOn.exe")
+    WinActivate
 ; 按下热键ALT+M
-Send {ALT Down}     ; 按下并按住ALT键
-Sleep, 200          ; 等待200毫秒
-Send M              ; 按下M键
-Send {ALT Up}       ; 抬起ALT键
+    Send {ALT Down}     ; 按下并按住ALT键
+    Sleep, 200          ; 等待200毫秒
+    Send M              ; 按下M键
+    Send {ALT Up}       ; 抬起ALT键
 */
 ; 退出程序
 ExitApp
 
 btnINI:
-WinMinimize
+  WinMinimize
 ; 打开ini文件
-RunWait ".\set.ini"
+    RunWait ".\set.ini"
 ; 恢复启动器
-WinRestore
+  WinRestore
 Return
 
 btnConfig:
-WinMinimize
-RunWait ".\config.exe"
-WinRestore
+  WinMinimize
+    RunWait ".\config.exe"
+  WinRestore
 Return
 
 GuiEscape:
