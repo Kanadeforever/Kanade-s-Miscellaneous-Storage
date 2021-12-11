@@ -1,8 +1,8 @@
-﻿#SingleInstance Force   	; 当脚本已经运行时自动重启脚本。
-                        	; #SingleInstance: Force - 自动重启; Ignore - 不重启; Prompt - 询问是否重启（默认选项）; Off - 允许同时运行多个实例。
-#NoEnv                  	; 为了性能和与未来AutoHotkey版本的兼容性，推荐使用。
-#NoTrayIcon             	; 不显示托盘图标。
-; #Warn                		; 启用警告，以协助检测常见错误。
+﻿#SingleInstance Force   		; 当脚本已经运行时自动重启脚本。
+                        		; #SingleInstance: Force - 自动重启; Ignore - 不重启; Prompt - 询问是否重启（默认选项）; Off - 允许同时运行多个实例。
+#NoEnv                  		; 为了性能和与未来AutoHotkey版本的兼容性，推荐使用。
+#NoTrayIcon             		; 不显示托盘图标。
+; #Warn                			; 启用警告，以协助检测常见错误。
 
 
 SetWorkingDir %A_ScriptDir%     ; 设置脚本所在位置为工作目录。
@@ -48,41 +48,52 @@ Return
 ;变量具体代码
 btnOriginal:
 
-	WinMinimize						; 最小化窗口
+	WinMinimize									; 最小化窗口
 
-		;Runwait ".\ComeOn.exe"				; 运行程序（Run为直接运行，RunWait为运行后等待进程结束再进行下一步）
-; /*
-		SetTimer, RunMagpie, -1				; 设置计时器，跳转RunMagpie子进程，即时进行
+		Runwait ".\ComeOn.exe"					; 运行程序（Run为直接运行，RunWait为运行后等待进程结束再进行下一步）
 
-			Sleep, 5000				; 等待5秒
+		SetTimer, RunMagpie, -1					; 设置计时器，跳转RunMagpie子进程，即时进行
 
-		if WinExist("ahk_exe ComeOn.exe")		; 如果检测到EXE程序正在运行
-		   WinActivate, ComeOn.exe			; 则激活ComeOn.exe为活动窗口
+		SetTimer, CheckComeOn, 5000				; 检测EXE程序运行状态并激活窗口
 
 		SetTimer, MagpieScaling, 5000			; 设置计时器，跳转MagpieScaling子进程，5秒后执行
-; */
-		Process, Exist, ComeOn.exe			; 检测是否存在ComeOn.exe进程
 
-		if (ErrorLevel = 0)				; 如果ErrorLevel为0
+		Process, Exist, ComeOn.exe				; 检测是否存在ComeOn.exe进程
+
+		if (ErrorLevel = 0)						; 如果ErrorLevel为0
 
 		{
-			Process, Close, Magpie.exe		; 结束Magpie.exe进程
+			Process, Close, Magpie.exe			; 结束Magpie.exe进程
 		}
 
-ExitApp								; 退出程序
+ExitApp											; 退出程序
 
 RunMagpie:
 
-	Run, ".\Magpie\Magpie.exe",, Min			; 最小化运行Magpie.exe
+	Run, ".\Magpie\Magpie.exe" -st,				; 最小化运行Magpie.exe；
+												; 【-st】指令为Magpie作者提供的内部指令
+												; 当前阶段Magpie存在BUG，需要设置工作目录才能缩放，已汇报给作者，等待解决
+
+Return
+
+CheckComeOn:
+
+	if WinExist("ahk_exe ComeOn.exe")			; 如果检测到EXE程序正在运行
+	   WinActivate, ComeOn.exe					; 则激活ComeOn.exe为活动窗口
+/*
+	DetectHiddenWindows, On
+	   WinGetPos,,, Width, Height, ComeOn.exe
+	   WinMove, ComeOn.exe,, (A_ScreenWidth/2)-(Width/2), (A_ScreenHeight/2)-(Height/2)
+*/
 
 Return
 
 MagpieScaling:
 
-	Send {ALT Down} 					; 按下A键
-		Sleep, 200 					; 等待200毫秒
-			Send F11 				; 按下F1111键
-	Send {ALT Up} 						; 抬起A键
+	Send {ALT Down} 							; 按下A键
+		Sleep, 20 								; 等待20毫秒
+			Send F11 							; 按下F11键
+	Send {ALT Up} 								; 抬起A键
 
 Return
 
@@ -131,8 +142,8 @@ ExitApp
 btnINI:
 
 	WinMinimize
-		RunWait ".\set.ini" 				; 打开ini文件
-	WinRestore 						; 恢复启动器
+		RunWait ".\set.ini" 					; 打开ini文件
+	WinRestore 									; 恢复启动器
 
 Return
 
@@ -150,3 +161,11 @@ GuiEscape:
 GuiClose:
 
     ExitApp
+
+/*
+
+现在的思路是要检测到 DaojianServer 这个窗口后，
+把它挪到屏幕中间，然后再进行缩放
+现阶段需要解决强制将进入游戏后的 DaojianServer 这个窗口强制移动
+
+*/
