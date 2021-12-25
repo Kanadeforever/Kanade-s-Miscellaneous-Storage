@@ -11,35 +11,35 @@ SetBatchLines -1                ; 设置脚本运行速度；
 
 Gui -MaximizeBox +AlwaysOnTop -DPIScale
 
-Gui Show, w900 h360, The Elden Scroll IV Oblivion Launcher
+Gui Show, w900 h360, Fallout 3 Launcher
 
 Gui Font, s15 Bold, Arial
 Gui Add, Text, x56 y66 w220 h35 ,  A
 Gui Add, Text, x56 y101 w220 h35 , Simple
-Gui Add, Text, x56 y136 w220 h35 , Oblivion
+Gui Add, Text, x56 y136 w220 h35 , Fallout 3
 Gui Add, Text, x56 y171 w220 h35 , With
 Gui Add, Text, x56 y206 w220 h35 , Mod Organizer
 Gui Add, Text, x56 y241 w220 h35 , Launcher
 
 Gui Font, s9 Bold, Arial
-Gui Add, Button, gOblivionMO2 x336 y56 w200 h50, &Oblivion With MO2
-Gui Add, Button, gOblivion x336 y146 w200 h50, &Oblivion
-Gui Add, Button, gMO2 x336 y236 w200 h50, &Mod Organizer2
-Gui Add, Button, gOLauncherMO2 x600 y56 w200 h50, &Oblivion Launcher With MO2
-Gui Add, Button, gOLauncher x600 y146 w200 h50, &Oblivion Launcher
-Gui Add, Button, gOMM x600 y236 w200 h50, &Oblivion Mod Manager With MO2
+Gui Add, Button, gFOSE x336 y56 w200 h50, &Fallout 3 With MO2
+Gui Add, Button, gFallout3 x336 y146 w200 h50, &Fallout 3
+Gui Add, Button, gMO2 x336 y236 w200 h50, &Mod Organizer 2
+Gui Add, Button, gFLauncherMO2 x600 y56 w200 h50, &Fallout 3 Launcher With MO2
+Gui Add, Button, gFLauncher x600 y146 w200 h50, &Fallout 3 Launcher
+Gui Add, Button, gLOOT x600 y236 w200 h50, &LOOT
 
 Return
 
 
-OblivionMO2:
+FOSE:
   WinMinimize
-    Runwait, ".\Tools\MO2\ModOrganizer.exe" "moshortcut://:Oblivion",
+    Runwait, ".\Tools\MO2\ModOrganizer.exe" "moshortcut://:FOSE",
 ExitApp
 
-Oblivion:
+Fallout3:
   WinMinimize
-    Runwait, ".\Oblivion.exe"
+    Runwait, ".\Fallout3.exe"
 ExitApp
 
 MO2:
@@ -48,20 +48,20 @@ MO2:
   WinRestore
 Return
 
-OLauncherMO2:
+FLauncherMO2:
   WinMinimize
-    Runwait, ".\Tools\MO2\ModOrganizer.exe" "moshortcut://:Oblivion Launcher",
+    Runwait, ".\Tools\MO2\ModOrganizer.exe" "moshortcut://:Fallout Launcher",
 ExitApp
 
 
-OLauncher:
+FLauncher:
   WinMinimize
     Runwait, ".\OblivionLauncher.exe"
 ExitApp
 
-OMM:
+LOOT:
   WinMinimize
-    Runwait, ".\Tools\MO2\ModOrganizer.exe" "moshortcut://:Oblivion Mod Manager",
+    Runwait, ".\Tools\MO2\ModOrganizer.exe" "moshortcut://:LOOT",
   WinRestore
 Return
 
