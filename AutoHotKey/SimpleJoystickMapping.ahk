@@ -55,6 +55,7 @@ Key8ToHoldDownPrev := Key8ToHoldDown
 Key9ToHoldDownPrev := Key9ToHoldDown
 Key10ToHoldDownPrev := Key10ToHoldDown
 
+
 ; 左摇杆
 if  (JoyY < 30)
 KeyYToHoldDown := "W"                           ; 定义左摇杆向上
@@ -74,9 +75,8 @@ if (KeyYToHoldDown = KeyYToHoldDownPrev)        ; 正确的键已经按下了（
 {
                                                 ; 什么都不做
 }
-else
+else                                            ; 否则，松开前一个键并按下新的键
 {
-                                                ; 否则，松开前一个键并按下新的键
 SetKeyDelay -1                                  ; 避免击键间的延迟
 if KeyYToHoldDownPrev                           ; 有一个以前的键可以释放
 Send, {%KeyYToHoldDownPrev% up}                 ; 释放它
@@ -88,9 +88,8 @@ if (KeyXToHoldDown = KeyXToHoldDownPrev)        ; 正确的键已经按下（或
 {
                                                 ; 什么都不做
 }
-else
+else                                            ; 否则，松开前一个键并按下新的键
 {
-                                                ; 否则，松开前一个键并按下新的键
 SetKeyDelay -1                                  ; 避免击键间的延迟
 if KeyXToHoldDownPrev                           ; 有一个以前的键可以释放
 Send, {%KeyXToHoldDownPrev% up}                 ; 释放它
@@ -118,9 +117,8 @@ if (KeyRToHoldDown = KeyRToHoldDownPrev)        ; 正确的键已经按下了（
 {
                                                 ; 什么都不做
 }
-else
+else                                            ; 否则，松开前一个键并按下新的键
 {
-                                                ; 否则，松开前一个键并按下新的键
 SetKeyDelay -1                                  ; 避免击键间的延迟
 if KeyRToHoldDownPrev                           ; 有一个以前的键可以释放
 Send, {%KeyRToHoldDownPrev% up}                 ; 释放它
@@ -132,14 +130,16 @@ if (KeyUToHoldDown = KeyUToHoldDownPrev)        ; 正确的键已经按下（或
 {
                                                 ; 什么都不做
 }
-else
+else                                            ; 否则，松开前一个键并按下新的键
 {
-                                                ; 否则，松开前一个键并按下新的键
 SetKeyDelay -1                                  ; 避免击键间的延迟
 if KeyUToHoldDownPrev                           ; 有一个以前的键可以释放
 Send, {%KeyUToHoldDownPrev% up}                 ; 释放它
 if KeyUToHoldDown                               ; 有一个键可以按下去
 Send, {%KeyUToHoldDown% down}                   ; 按下它
+}
+
+
 ; 方向键
 ; 有些操纵杆可能有一个平滑/连续的POV，而不是一个固定增量的POV。
 ; 为了支持他们所有人，使用一个范围：
@@ -160,15 +160,15 @@ if (KeyPOVToHoldDown = KeyPOVToHoldDownPrev)    ; 正确的键已经按下了（
 {
                                                 ; 什么都不做
 }
-else
+else                                            ; 否则，松开前一个键并按下新的键
 {
-                                                ; 否则，松开前一个键并按下新的键
 SetKeyDelay -1                                  ; 避免击键间的延迟
 if KeyPOVToHoldDownPrev                         ; 有一个以前的键可以释放
 Send, {%KeyPOVToHoldDownPrev% up}               ; 释放它
 if KeyPOVToHoldDown                             ; 有一个键可以按下去
 Send, {%KeyPOVToHoldDown% down}                 ; 按下它
 }
+
 
 ; 左右扳机
 if (JoyZ > 70)
@@ -182,15 +182,15 @@ if (KeyZToHoldDown = KeyZToHoldDownPrev)        ; 正确的键已经按下（或
 {
                                                 ; 什么都不做
 }
-else
+else                                        	; 否则，松开前一个键并按下新的键
 {
-                                                ; 否则，松开前一个键并按下新的键
 SetKeyDelay -1                                  ; 避免击键间的延迟
 if KeyZToHoldDownPrev                           ; 有一个以前的键可以释放
 Send, {%KeyZToHoldDownPrev% up}                 ; 释放它
 if KeyXToHoldDown                               ; 有一个键可以按下去
 Send, {%KeyZToHoldDown% down}                   ; 按下它
 }
+
 
 ; Joy1
 if (KJoy1 > 0)
@@ -202,15 +202,15 @@ if (Key1ToHoldDown = Key1ToHoldDownPrev)        ; 正确的键已经按下了（
 {
                                                 ; 什么都不做
 }
-else
+else                                            ; 否则，松开前一个键并按下新的键
 {
-                                                ; 否则，松开前一个键并按下新的键
 SetKeyDelay -1                                  ; 避免击键间的延迟
 if Key1ToHoldDownPrev                           ; 有一个以前的键可以释放
 Send, {%Key1ToHoldDownPrev% up}                 ; 释放它
 if Key1ToHoldDown                               ; 有一个键可以按下去
 Send, {%Key1ToHoldDown% down}                   ; 按下它
 }
+
 
 ; Joy2
 if (KJoy2 > 0)
@@ -222,15 +222,15 @@ if (Key2ToHoldDown = Key2ToHoldDownPrev)        ; 正确的键已经按下了（
 {
                                                 ; 什么都不做
 }
-else
+else                                            ; 否则，松开前一个键并按下新的键
 {
-                                                ; 否则，松开前一个键并按下新的键
 SetKeyDelay -1                                  ; 避免击键间的延迟
 if Key2ToHoldDownPrev                           ; 有一个以前的键可以释放
 Send, {%Key2ToHoldDownPrev% up}                 ; 释放它
 if Key2ToHoldDown                               ; 有一个键可以按下去
 Send, {%Key2ToHoldDown% down}                   ; 按下它
 }
+
 
 ; Joy3
 if (KJoy3 > 0)
@@ -242,15 +242,15 @@ if (Key3ToHoldDown = Key3ToHoldDownPrev)        ; 正确的键已经按下了（
 {
                                                 ; 什么都不做
 }
-else
+else                                            ; 否则，松开前一个键并按下新的键
 {
-                                                ; 否则，松开前一个键并按下新的键
 SetKeyDelay -1                                  ; 避免击键间的延迟
 if Key3ToHoldDownPrev                           ; 有一个以前的键可以释放
 Send, {%Key3ToHoldDownPrev% up}                 ; 释放它
 if Key3ToHoldDown                               ; 有一个键可以按下去
 Send, {%Key3ToHoldDown% down}                   ; 按下它
 }
+
 
 ; Joy4
 if (KJoy4 > 0)
@@ -262,15 +262,15 @@ if (Key4ToHoldDown = Key4ToHoldDownPrev)        ; 正确的键已经按下了（
 {
                                                 ; 什么都不做
 }
-else
+else                                            ; 否则，松开前一个键并按下新的键
 {
-                                                ; 否则，松开前一个键并按下新的键
 SetKeyDelay -1                                  ; 避免击键间的延迟
 if Key4ToHoldDownPrev                           ; 有一个以前的键可以释放
 Send, {%Key4ToHoldDownPrev% up}                 ; 释放它
 if Key4ToHoldDown                               ; 有一个键可以按下去
 Send, {%Key4ToHoldDown% down}                   ; 按下它
 }
+
 
 ; Joy5
 if (KJoy5 > 0)
@@ -282,15 +282,15 @@ if (Key5ToHoldDown = Key5ToHoldDownPrev)        ; 正确的键已经按下了（
 {
                                                 ; 什么都不做
 }
-else
+else                                            ; 否则，松开前一个键并按下新的键
 {
-                                                ; 否则，松开前一个键并按下新的键
 SetKeyDelay -1                                  ; 避免击键间的延迟
 if Key5ToHoldDownPrev                           ; 有一个以前的键可以释放
 Send, {%Key5ToHoldDownPrev% up}                 ; 释放它
 if Key5ToHoldDown                               ; 有一个键可以按下去
 Send, {%Key5ToHoldDown% down}                   ; 按下它
 }
+
 
 ; Joy6
 if (KJoy6 > 0)
@@ -302,15 +302,15 @@ if (Key6ToHoldDown = Key6ToHoldDownPrev)        ; 正确的键已经按下了（
 {
                                                 ; 什么都不做
 }
-else
+else                                            ; 否则，松开前一个键并按下新的键
 {
-                                                ; 否则，松开前一个键并按下新的键
 SetKeyDelay -1                                  ; 避免击键间的延迟
 if Key6ToHoldDownPrev                           ; 有一个以前的键可以释放
 Send, {%Key6ToHoldDownPrev% up}                 ; 释放它
 if Key6ToHoldDown                               ; 有一个键可以按下去
 Send, {%Key6ToHoldDown% down}                   ; 按下它
 }
+
 
 ; Joy7
 if (KJoy7 > 0)
@@ -322,15 +322,15 @@ if (Key7ToHoldDown = Key7ToHoldDownPrev)        ; 正确的键已经按下了（
 {
                                                 ; 什么都不做
 }
-else
+else                                            ; 否则，松开前一个键并按下新的键
 {
-                                                ; 否则，松开前一个键并按下新的键
 SetKeyDelay -1                                  ; 避免击键间的延迟
 if Key7ToHoldDownPrev                           ; 有一个以前的键可以释放
 Send, {%Key7ToHoldDownPrev% up}                 ; 释放它
 if Key7ToHoldDown                               ; 有一个键可以按下去
 Send, {%Key7ToHoldDown% down}                   ; 按下它
 }
+
 
 ; Joy8
 if (KJoy8 > 0)
@@ -342,15 +342,15 @@ if (Key8ToHoldDown = Key8ToHoldDownPrev)        ; 正确的键已经按下了（
 {
                                                 ; 什么都不做
 }
-else
+else                                            ; 否则，松开前一个键并按下新的键
 {
-                                                ; 否则，松开前一个键并按下新的键
 SetKeyDelay -1                                  ; 避免击键间的延迟
 if Key8ToHoldDownPrev                           ; 有一个以前的键可以释放
 Send, {%Key8ToHoldDownPrev% up}                 ; 释放它
 if Key8ToHoldDown                               ; 有一个键可以按下去
 Send, {%Key8ToHoldDown% down}                   ; 按下它
 }
+
 
 ; Joy9
 if (KJoy9 > 0)
@@ -362,9 +362,8 @@ if (Key9ToHoldDown = Key9ToHoldDownPrev)        ; 正确的键已经按下了（
 {
                                                 ; 什么都不做
 }
-else
+else                                            ; 否则，松开前一个键并按下新的键
 {
-                                                ; 否则，松开前一个键并按下新的键
 SetKeyDelay -1                                  ; 避免击键间的延迟
 if Key9ToHoldDownPrev                           ; 有一个以前的键可以释放
 Send, {%Key9ToHoldDownPrev% up}                 ; 释放它
@@ -382,9 +381,8 @@ if (Key10ToHoldDown = Key10ToHoldDownPrev)      ; 正确的键已经按下了（
 {
                                                 ; 什么都不做
 }
-else
+else                                            ; 否则，松开前一个键并按下新的键
 {
-                                                ; 否则，松开前一个键并按下新的键
 SetKeyDelay -1                                  ; 避免击键间的延迟
 if Key10ToHoldDownPrev                          ; 有一个以前的键可以释放
 Send, {%Key10ToHoldDownPrev% up}                ; 释放它
