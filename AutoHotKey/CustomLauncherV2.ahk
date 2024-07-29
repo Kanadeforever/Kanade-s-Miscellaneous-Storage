@@ -138,7 +138,7 @@ About(A_GuiEvent, GuiCtrlObj, Info, *)
     oGui3.Show("w300 h320")
     oGui3.Title := "关于&说明"
     oGui3.Add("Text", , "正文：`n`n按名字理解，自定义启动器`n`n你可以指定exe和命令行也可以拿来干其他的`n随你怎样`n`n一般来说是拿来代理steam上有些游戏的mod或者汉化的exe`n虽然有时候直接改名字也可以但如果你想保留原版exe`n那么它就解决这个问题了`n只需要按你想要的时间点改一下exe的设置就行了`n就是这样")
-    oGui3.Add("Text", , "By Luminous 20240729`nPowered By Autohotkey 2.0.18 & Microsoft Copilot")
+    oGui3.Add("Text", , "By Luminous 20240729`nPowered By Autohotkey 2.0.18 && Microsoft Copilot")
     oGui3OK := oGui3.Add("Button", "x210 y280 w60 h20", "&OK")
     oGui3OK.OnEvent("Click", OK.Bind("Normal"))
     return
