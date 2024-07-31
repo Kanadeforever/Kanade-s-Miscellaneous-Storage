@@ -1,4 +1,4 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
 Persistent
 #SingleInstance Force
 
@@ -7,8 +7,8 @@ IniFile := StrReplace(A_ScriptDir "\" A_ScriptName, ".exe", "") ".ini"
 ; 检查是否存在ini文件
 if !FileExist(IniFile)
 {
-    MsgBox("请选择一个exe文件", "提示", 64)
-    exePath := FileSelect(3, "", "选择exe文件", "*.exe")
+    MsgBox("请选择可执行文件", "提示", 64)
+    exePath := FileSelect(3, "", "选择可执行文件", "*.exe;*.bat;*.cmd;*.vbs")
     If (exePath != "")
     {
         ; 检查exe文件是否在脚本目录中
@@ -47,13 +47,16 @@ myGui.SetFont("s10")
 myGui.Add("Text", "x20 y65", "当前启动参数：")
 ; 将启动参数显示在此控件中
 commandText := myGui.Add("Edit", "x20 y90 w480 ReadOnly Multi -VScroll -HSCroll", exePath " " otherParams1 " " otherParams2)
-
+; gui主要内容
 ogcButtonLaunch := myGui.Add("Button", "x300 y165 w200 h50", "&Launch")
 ogcButtonLaunch.OnEvent("Click", RunExe)
 ogcButtonConfig := myGui.Add("Button", "x300 y235 w200 h50", "&Config")
 ogcButtonConfig.OnEvent("Click", ReSelectExe)
 ogcButtonAbout := myGui.Add("Button", "x24 y265 w60 h35", "&About")
 ogcButtonAbout.OnEvent("Click", About.Bind("Normal"))
+myGui.SetFont("s8 bold")
+myGui.Add("Text", "x24 y200", "提示：`n如果你的命令行参数带空格，或者希望组合起`n来用，又或者你的环境不允许直接使用脚本，`n那么推荐用bat＆cmd脚本或vbs脚本来处理这`n些带空格的参数。")
+myGui.Add("Text", "x420 y300", "Version：0.2.0")
 
 myGui.Title := "自定义启动器"
 
