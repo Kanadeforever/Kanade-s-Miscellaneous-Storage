@@ -108,7 +108,7 @@ ReSelectExe(*)
 ; 选择exe文件按钮功能
 SelectExe(ogcEditNewExePath, *)
 {
-    newExePath := FileSelect(3, "", "选择exe文件", "*.exe")
+    newExePath := FileSelect(3, "", "选择可执行文件", "*.exe;*.bat;*.cmd;*.vbs")
     If (newExePath != "")
     {
         ogcEditNewExePath.Value := newExePath
