@@ -14,3 +14,22 @@ SetWorkingDir(A_ScriptDir)                                  ; SetWorkingDir指�
     WinMove(TargetX, TargetY, , , ActiveWindowTitle)        ; WinMove指令将窗口移动到计算出的目标X和目标Y坐标位置。
     return
 }
+
+; 创建托盘菜单
+Tray := A_TrayMenu
+Tray.Delete()
+Tray.Add("使用说明", ShowInstructions)
+Tray.Add("退出", CloseApp)
+
+
+; 显示使用说明的函数
+ShowInstructions(A_ThisMenuItem, A_ThisMenuItemPos, MyMenu)
+{
+    MsgBox("使用说明：`n按Ctrl+Shift+Alt+Backspace（退格键）将前台激活的窗口居中显示`n`nBy Luminous`n20240802")
+    return
+}
+
+CloseApp(*)
+{
+    ExitApp()
+}
