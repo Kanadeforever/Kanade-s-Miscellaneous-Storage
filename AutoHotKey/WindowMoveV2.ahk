@@ -1,4 +1,4 @@
-#Requires Autohotkey v2.0
+#Requires Autohotkey v2.0+
 
 #SingleInstance Force
 
