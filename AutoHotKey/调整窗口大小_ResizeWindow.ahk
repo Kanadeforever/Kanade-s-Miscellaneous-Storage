@@ -1,4 +1,4 @@
-﻿;============================================================
+;============================================================
 ; 窗口控制调整脚本
 ; 版本: 0.1
 ; 作者: Microsoft Copilot Think Deeper
@@ -24,8 +24,10 @@
 SendMode Input
 SetWorkingDir %A_ScriptDir%
 
-Menu, Tray, NoStandard                          ; 删除所有默认的托盘菜单项
-Menu, Tray, Add, 退出脚本, ExitApplication      ; 添加一个自定义的退出菜单项
+Menu, Tray, NoStandard                          ; 删除所有默认菜单项，确保只显示自定义项
+Menu, Tray, Add, 帮助, ShowHelp                 ; 添加“帮助”菜单项，关联 ShowHelp 标签
+Menu, Tray, Add,                                ; 添加分隔符
+Menu, Tray, Add, 退出程序, ExitApplication      ; 添加一个自定义的退出菜单项
 
 ; 为确保在高DPI环境下精确测量，设置当前进程为 DPI aware
 DllCall("SetProcessDPIAware")
@@ -39,7 +41,7 @@ DllCall("SetProcessDPIAware")
     if (activeHwnd = "")
     {
         MsgBox, 错误：无法获取活动窗口的句柄！
-        return
+        Return
     }
 
     ;--------------------------------------------------------------------------------------
@@ -50,7 +52,7 @@ DllCall("SetProcessDPIAware")
     ; 使用 MsgBox 显示当前活动窗口的标题和句柄，让用户确认是否继续
     MsgBox, 4, 窗口信息, 当前活动窗口为:`n`n标题: %activeWindowTitle%`n句柄: %activeHwnd%`n`n是否继续操作？
     IfMsgBox, No
-        return
+        Return
     ; 确认后，将目标窗口直接设置为当前活动窗口
     targetWindow := activeHwnd
 
@@ -59,12 +61,12 @@ DllCall("SetProcessDPIAware")
     ;--------------------------------------------------------------------------------------
     InputBox, desiredWidth, 窗口宽度, 请输入目标窗口客户区宽度`n不含边框和标题栏:, , 220, 150
     if ErrorLevel
-        return
+        Return
     desiredWidth := desiredWidth + 0  ; 将输入转换成数字
 
     InputBox, desiredHeight, 窗口高度, 请输入目标窗口客户区高度`n不含边框和标题栏:, , 220, 150
     if ErrorLevel
-        return
+        Return
     desiredHeight := desiredHeight + 0  ; 将输入转换成数字
 
     ;--------------------------------------------------------------------------------------
@@ -77,7 +79,7 @@ DllCall("SetProcessDPIAware")
     if (!DllCall("GetClientRect", "Ptr", targetWindow, "Ptr", &clientRect))
     {
         MsgBox, 错误：无法获取窗口客户区尺寸！
-        return
+        Return
     }
     ; GetClientRect 返回的 left 与 top 为 0，其 right、bottom 分别为客户区宽、高
     clientW := NumGet(clientRect, 8, "Int")
@@ -99,7 +101,7 @@ DllCall("SetProcessDPIAware")
     if ErrorLevel
     {
         MsgBox, 错误：无法调整窗口尺寸！
-        return
+        Return
     }
 
     ;--------------------------------------------------------------------------------------
@@ -111,7 +113,7 @@ DllCall("SetProcessDPIAware")
     if (!DllCall("GetClientRect", "Ptr", targetWindow, "Ptr", &newClientRect))
     {
         MsgBox, 错误：无法获取调整后窗口客户区尺寸！
-        return
+        Return
     }
     newClientW := NumGet(newClientRect, 8, "Int")
     newClientH := NumGet(newClientRect, 12, "Int")
@@ -145,12 +147,16 @@ DllCall("SetProcessDPIAware")
         ; 此处可继续扩展其他功能，此示例仅提示并结束当前热键流程
         Return
     }
-return
+Return
 
 ; 托盘菜单内容
+ShowHelp:
+{
+    ; 弹出消息框，显示脚本的使用说明、操作流程等信息
+    MsgBox, 64, 程序使用说明, 本程序用于精确调整目标窗口显示区的尺寸。`n`n按 Ctrl+Alt+R 热键启动窗口调整操作，流程如下：`n　1. 自动获取当前活动窗口，并显示窗口信息供用户确认;`n　2. 依次输入目标显示区的宽度和高度;`n　3. 动态计算窗口边框与标题栏占用的像素，并调整整体窗口尺寸;`n　4. 调整后会显示验证信息;`n　5. 根据提示选择是否结束程序。`n`n你可通过托盘菜单中的“退出程序”来结束本程序。
+}
 
 ExitApplication:
     {
         ExitApp
     }
-return
