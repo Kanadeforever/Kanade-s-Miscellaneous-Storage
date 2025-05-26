@@ -1,17 +1,16 @@
 @echo off
+setlocal disableDelayedExpansion
 
-title FFMpeg无损转MP4格式
+set "ffmpeg=%~dp0ffmpeg.exe"
 
-rem 直接将文件拖拽至本Bat文件上即可，可批量进行
+:loop
+if "%~1"=="" exit /b
+set "input=%~1"
+set "output=%~n1.mp4"
 
-rem 注：原文件名不能有“)”、“^”、“&”、“=”、“;”、“,”符号
+setlocal enableDelayedExpansion
+"%ffmpeg%" -i "!input!" -codec copy "!ffmpegpath!!output!"
+endlocal
 
-set ffmpegpath=%~dp0
-
-for %%a in (%*) do (
-
-  "%ffmpegpath%ffmpeg.exe" -i %%a -codec copy "%ffmpegpath%%%~na.mp4"
-
-)
-
-exit
+shift
+goto loop
