@@ -26,6 +26,12 @@
 - 用于间隔一定时间输入某个按键，可能有部分BUG，但，it just works.
 - 用来看韩漫整的，感谢Microsoft Copilot辅助。
 
+## AutoPageGUIV3.ahk
+
+- [AutoPageGUIV2.ahk](#autopagev2)的升级版。
+- 追加了按键日志功能、精细化了数值（目前使用0.01秒为单位时间）、可配置重复次数、全局快捷键。
+- 感谢Microsoft Copilot辅助。
+
 <a id="customl1"></a>
 ## CustomLauncherV1.ahk
 
