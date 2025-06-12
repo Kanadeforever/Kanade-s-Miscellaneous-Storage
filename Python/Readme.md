@@ -14,3 +14,10 @@
 - 支持为截图添加时间戳与帧序号，以及这两项的字号调整；
 - 日志等级支持两种详细程度；
 - 基本上我提需求与DEBUG，Microsoft Copilot完成代码。
+
+## CHD&CSOConverterFrontendV4.py
+
+- 为[maxcso](https://github.com/unknownbrackets/maxcso)和[chdman(包含在mame发行版文件内)](https://docs.mamedev.org/tools/chdman.html)写的共用前端；
+- 基本上我提需求与DEBUG，Microsoft Copilot完成代码；
+- 依然有些小问题；
+- it just works!
