@@ -5,6 +5,7 @@ import shutil           # 提供文件和文件夹的高级操作功能，如复
 import subprocess       # 用于调用系统命令，例如运行 ffmpeg 工具
 import uuid             # 用于生成唯一的临时文件夹名，防止重名
 import configparser     # 用于读取和写入配置文件（.ini 格式）
+import threading        # 导入线程模块
 from datetime import datetime, timezone  # 时间处理模块，用于生成带时区的时间戳
 
 # 第三方库（需要安装）
@@ -13,6 +14,7 @@ from PIL import Image, ImageDraw, ImageFont  # Pillow 图像处理库，用于�
 # GUI 库（内建的）
 import tkinter as tk  # tkinter 是 Python 内建的 GUI 框架，适用于简单图形界面
 from tkinter import filedialog, messagebox, ttk  # 导入常用子模块用于文件选择窗口、消息对话框、美化控件
+from tkinter.scrolledtext import ScrolledText   # 导入日志相关控件
 
 # 日志等级定义，用于控制输出信息的详细程度
 LOG_NONE = 0       # 不显示任何日志
@@ -154,7 +156,8 @@ def log(msg, level, current_level):
     """
 
     if current_level >= level:
-        print(msg)  # 满足条件才打印
+        timestamp = datetime.now().strftime("[%H:%M:%S]")
+        print(f"{timestamp} {msg}")  # 满足条件才打印
 
 # 功能：使用 ffmpeg 提取视频的多帧画面（用于拼图）
 def extract_frames_ffmpeg(video_path, out_dir, total_frames, start_offset,
@@ -183,7 +186,9 @@ def extract_frames_ffmpeg(video_path, out_dir, total_frames, start_offset,
 
     try:
         duration = float(result.stdout)  # 得到视频总时长（单位：秒）
-        log(f"[INFO] 视频时长: {duration:.2f}s", LOG_VERBOSE, log_level)
+        # log(f"[INFO] 视频时长: {duration:.2f}s", LOG_VERBOSE, log_level)
+        log(f"[DETAIL] 视频总时长为 {duration:.2f} 秒，将提取 {total_frames} 帧", LOG_VERBOSE, log_level)
+        log(f"[DETAIL] 每帧间隔约为 {(duration - start_offset) / total_frames:.2f} 秒，起始偏移 {start_offset}s", LOG_VERBOSE, log_level)
     except ValueError:
         raise RuntimeError("无法解析视频时长。")
 
@@ -194,7 +199,7 @@ def extract_frames_ffmpeg(video_path, out_dir, total_frames, start_offset,
         ts = start_offset + i * interval  # 当前帧对应的时间戳（秒数）
         out_file = os.path.join(out_dir, f"frame_{i:02d}.jpg")
         cmd = [ffmpeg, '-ss', str(ts), '-i', video_path, '-frames:v', '1', '-q:v', '2', out_file, '-y']
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
         timestamps.append((out_file, ts))
 
     return timestamps
@@ -214,8 +219,11 @@ def create_thumbnail(frame_data, rows, cols, max_width, log_level,
     """
 
     images = []
+    # 输出日志
+    log(f"[DETAIL] 开始拼接 {len(frame_data)} 张图像为 {rows}×{cols} 网格", LOG_VERBOSE, log_level)
 
     for idx, (path, ts) in enumerate(frame_data):
+        log(f"[DETAIL] 处理第 {idx+1:02d} 帧：{path}", LOG_VERBOSE, log_level)
         img = Image.open(path).convert("RGBA")  # 打开图像并转换为带透明通道
         draw = ImageDraw.Draw(img)
 
@@ -228,9 +236,11 @@ def create_thumbnail(frame_data, rows, cols, max_width, log_level,
         labels = []
         if show_index:
             labels.append(("left-top", f"{idx+1:02d}"))  # 格式化为两位数编号
+            log(f"[DETAIL] 添加序号标签：{idx+1:02d}", LOG_VERBOSE, log_level)  # 输出日志
         if show_timestamp:
             ts_text = datetime.fromtimestamp(ts, tz=timezone.utc).strftime('%H:%M:%S.%f')[:-3]
             labels.append(("right-bottom", ts_text))  # 精确到毫秒的时间戳
+            log(f"[DETAIL] 添加时间戳标签：{ts_text}", LOG_VERBOSE, log_level)  # 输出日志
 
         for pos, text in labels:
             # 尝试获取文字宽高（兼容不同 Pillow 版本）
@@ -300,6 +310,7 @@ def create_thumbnail(frame_data, rows, cols, max_width, log_level,
         thumb = thumb.resize((max_width, int(thumb.height * ratio)),
                              getattr(Image, 'Resampling', Image).LANCZOS)
         log(f"[INFO] 缩略图已缩放至宽度 {max_width}px", LOG_VERBOSE, log_level)
+    log(f"[DETAIL] 最终缩略图尺寸：{thumb.width}x{thumb.height}px", LOG_VERBOSE, log_level)
 
     return thumb
 
@@ -322,8 +333,9 @@ def generate_thumbnail(video_path, out_dir, rows, cols,
 
     # 使用 UUID 生成一个临时文件夹名，用于保存中间帧图像
     temp_dir = f"thumb_frames_{uuid.uuid4().hex[:8]}"
+    log(f"[DETAIL] 生成临时帧图像目录：{temp_dir}", LOG_VERBOSE, log_level)
+    log(f"[INFO] 正在处理：{video_path}", LOG_SIMPLE, log_level)
     try:
-        log(f"[INFO] 正在处理：{video_path}", LOG_SIMPLE, log_level)
         frame_data = extract_frames_ffmpeg(video_path, temp_dir, rows * cols, 5.0,
                                            ffmpeg_path, ffprobe_path, log_level)
         thumb = create_thumbnail(frame_data, rows, cols, 4096, log_level,
@@ -332,11 +344,16 @@ def generate_thumbnail(video_path, out_dir, rows, cols,
         name = os.path.splitext(os.path.basename(video_path))[0] + "_preview.jpg"
         out_path = os.path.join(out_dir, name)
         thumb.save(out_path)
-        log(f"[SUCCESS] 生成成功：{out_path}", LOG_SIMPLE, log_level)
+        log(f"[INFO] 已完成：{video_path}", LOG_SIMPLE, log_level)  # ✅ 成功提示
+        log(f"[DETAIL] 已保存缩略图至：{out_path}", LOG_VERBOSE, log_level)
+    except Exception as e:
+        log(f"[ERROR] 处理失败：{video_path}，原因：{str(e)}", LOG_SIMPLE, log_level)  # ✅ 错误输出
+        raise  # 保持原有异常逻辑
     finally:
         # 清理临时目录，释放空间
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
+            log(f"[DETAIL] 已清理临时目录：{temp_dir}", LOG_VERBOSE, log_level)
 
 # 功能：批量处理输入路径，可以是单个文件或整个文件夹
 def handle_batch(input_path, out_dir, rows, cols,
@@ -350,20 +367,61 @@ def handle_batch(input_path, out_dir, rows, cols,
     - 其他情况抛出错误。
     """
 
+    log(f"[DETAIL] 扫描输入路径：{input_path}", LOG_VERBOSE, log_level)
+
+    success_count = 0
+    skip_nonvideo = 0
+    skip_failed = 0
+
+    def process_file(filepath, filename=None):
+        nonlocal success_count, skip_failed, skip_nonvideo
+        try:
+            if is_video_file(filepath):
+                generate_thumbnail(filepath, out_dir, rows, cols,
+                                   show_timestamp, show_index, font_size,
+                                   ffmpeg_path, ffprobe_path, log_level)
+                success_count += 1
+            else:
+                log(f"[DETAIL] 跳过非视频文件：{filename or filepath}", LOG_VERBOSE, log_level)
+                skip_nonvideo += 1
+        except Exception as e:
+            log(f"[DETAIL] 跳过异常视频：{filename or filepath}，原因：{str(e)}", LOG_VERBOSE, log_level)
+            skip_failed += 1
+
     if os.path.isfile(input_path):
-        if is_video_file(input_path):
-            generate_thumbnail(input_path, out_dir, rows, cols,
-                               show_timestamp, show_index, font_size,
-                               ffmpeg_path, ffprobe_path, log_level)
+        process_file(input_path)
     elif os.path.isdir(input_path):
         for file in os.listdir(input_path):
             full_path = os.path.join(input_path, file)
-            if os.path.isfile(full_path) and is_video_file(file):
-                generate_thumbnail(full_path, out_dir, rows, cols,
-                                   show_timestamp, show_index, font_size,
-                                   ffmpeg_path, ffprobe_path, log_level)
+            if os.path.isfile(full_path):
+                process_file(full_path, file)
     else:
         raise FileNotFoundError("输入路径无效。")
+
+    # 输出统计摘要
+    total = success_count + skip_failed + skip_nonvideo
+    log(f"[INFO] 批量处理完成：", LOG_SIMPLE, log_level)
+    log(f"- 成功生成：{success_count} 个视频的预览图", LOG_SIMPLE, log_level)
+    if skip_nonvideo > 0:
+        log(f"- 跳过非视频：{skip_nonvideo} 个", LOG_SIMPLE, log_level)
+    if skip_failed > 0:
+        log(f"- 跳过异常视频：{skip_failed} 个", LOG_SIMPLE, log_level)
+    if total == 0:
+        log(f"- 未处理任何文件。", LOG_SIMPLE, log_level)
+
+# === 重定向控制台输出到 GUI 文本框 ===
+class TextRedirector:
+    def __init__(self, widget):
+        self.widget = widget
+
+    def write(self, msg):
+        self.widget.configure(state="normal")
+        self.widget.insert("end", msg.rstrip() + "\n")
+        self.widget.see("end")
+        self.widget.configure(state="disabled")
+
+    def flush(self):
+        pass # 与标准输出接口兼容
 
 # 程序主入口，构建图形界面
 def start_gui():
@@ -386,8 +444,9 @@ def start_gui():
 
     # 创建主窗口
     root = tk.Tk()
-    root.title("🎞️ 视频预览图生成器")      # 窗口标题
-    root.geometry("850x520")                # 初始窗口大小
+    root.title("视频预览图生成器")      # 窗口标题
+    # root.geometry("850x520")                # 初始窗口大小
+    root.geometry("850x750")                # 初始窗口大小
     root.minsize(600, 480)                  # 最小窗口大小
     root.resizable(False, False)             # 允许左右拉伸，禁止上下拉伸
 
@@ -413,8 +472,8 @@ def start_gui():
     log_level_var = tk.StringVar(value=defaults.get("log_level", "简单信息"))                      # 日志等级
     row_var = tk.StringVar(value=defaults.get("rows", "6"))                                        # 行数
     col_var = tk.StringVar(value=defaults.get("cols", "6"))                                        # 列数
-
-# 选择路径（文件或文件夹），并将选择结果写入对应的变量
+    
+    # 选择路径（文件或文件夹），并将选择结果写入对应的变量
     def browse_path(var, folder=False):
     # 弹出文件夹选择或文件选择对话框
         path = filedialog.askdirectory() if folder else filedialog.askopenfilename()
@@ -422,11 +481,11 @@ def start_gui():
         # 将选择结果写入绑定的变量（StringVar 类型）
             var.set(path)
 
-# 打开输出目录（在资源管理器 / Finder / 文件管理器中打开）
+    # 打开输出目录（在资源管理器 / Finder / 文件管理器中打开）
     def open_output_dir(path):
         path = path.strip()  # 去除首尾空白字符
         if not path or not os.path.exists(path):
-        # 如果路径为空或不存在，弹出错误提示框
+            # 如果路径为空或不存在，弹出错误提示框
             messagebox.showerror("错误", "输出目录无效或不存在。")
             return
         try:
@@ -440,12 +499,12 @@ def start_gui():
             # 若不属于以上系统，提示不支持
                 messagebox.showwarning("提示", "不支持此平台的目录打开操作。")
         except Exception as e:
-        # 弹出错误对话框，显示异常信息
+            # 弹出错误对话框，显示异常信息
             messagebox.showerror("打开失败", str(e))
 
-# 保存当前界面上所有配置项到 config.ini 文件
+    # 保存当前界面上所有配置项到 config.ini 文件
     def save_current_config():
-    # 保存缩略图设置（行列、字体大小、是否显示时间戳与序号、日志等级）
+        # 保存缩略图设置（行列、字体大小、是否显示时间戳与序号、日志等级）
         config["Defaults"]["rows"] = row_var.get()
         config["Defaults"]["cols"] = col_var.get()
         config["Defaults"]["font_size"] = font_size_var.get()
@@ -453,38 +512,38 @@ def start_gui():
         config["Defaults"]["show_index"] = str(index_var.get()).lower()
         config["Defaults"]["log_level"] = log_level_var.get()
 
-    # 保存路径设置
+        # 保存路径设置
         config["Paths"]["input_path"] = input_var.get()
         config["Paths"]["output_path"] = output_var.get()
         config["Paths"]["ffmpeg_path"] = ffmpeg_dir_var.get()
         config["Paths"]["use_custom_ffmpeg"] = str(use_custom_ffmpeg.get()).lower()
 
-    # 写入到 config.ini 文件中
+        # 写入到 config.ini 文件中
         with open("config.ini", "w", encoding="utf-8") as f:
             config.write(f)
 
-# 控制“自定义 ffmpeg 路径”输入框的启用/禁用状态
+    # 控制“自定义 ffmpeg 路径”输入框的启用/禁用状态
     def toggle_ffmpeg_fields():
         if use_custom_ffmpeg.get():
-        # 启用：显示路径输入框和浏览按钮
+            # 启用：显示路径输入框和浏览按钮
             ffmpeg_path_frame.grid()
             ffmpeg_entry.config(state="normal")
             ffmpeg_browse_btn.config(state="normal")
         else:
-        # 禁用：锁定用户编辑防止误操作
+            # 禁用：锁定用户编辑防止误操作
             ffmpeg_entry.config(state="disabled")
             ffmpeg_browse_btn.config(state="disabled")
 
-# 当点击“生成缩略图”按钮时执行的主逻辑
+    # 当点击“生成缩略图”按钮时执行的主逻辑
     def run():
         try:
-        # 获取输入路径并检查其有效性
+            # 获取输入路径并检查其有效性
             input_path = input_var.get().strip()
             if not input_path or not os.path.exists(input_path):
                 messagebox.showerror("错误", "请提供有效的输入路径。")
                 return
 
-        # 推断默认输出路径（与输入路径相同或其父目录）
+            # 推断默认输出路径（与输入路径相同或其父目录）
             if os.path.isfile(input_path):
                 default_output = os.path.dirname(input_path)
             elif os.path.isdir(input_path):
@@ -493,27 +552,27 @@ def start_gui():
                 messagebox.showerror("错误", "输入路径无法识别为文件或文件夹。")
                 return
 
-        # 如果未手动设定输出路径，则使用默认值
+            # 如果未手动设定输出路径，则使用默认值
             if not output_var.get().strip():
                 output_var.set(default_output)
             output_path = output_var.get().strip()
 
-        # 获取行列数（拼图结构）
+            # 获取行列数（拼图结构）
             rows = int(row_var.get())
             cols = int(col_var.get())
-        # 字号转为整数，失败时使用默认值 64
+            # 字号转为整数，失败时使用默认值 64
             try:
                 font_size = int(font_size_var.get())
             except:
                 font_size = 64
-        # 获取选项值
+            # 获取选项值
             show_ts = timestamp_var.get()
             show_idx = index_var.get()
-        # 将日志等级的中文转换为对应数字常量
+            # 将日志等级的中文转换为对应数字常量
             log_map = {"无": LOG_NONE, "简单信息": LOG_SIMPLE, "详细信息": LOG_VERBOSE}
             log_level = log_map.get(log_level_var.get(), LOG_SIMPLE)
 
-        # 获取 ffmpeg 路径，如果找不到则提示错误
+            # 获取 ffmpeg 路径，如果找不到则提示错误
             try:
                 ffmpeg_path = resolve_tool_path("ffmpeg", use_custom_ffmpeg.get(), ffmpeg_dir_var.get())
                 ffprobe_path = resolve_tool_path("ffprobe", use_custom_ffmpeg.get(), ffmpeg_dir_var.get())
@@ -521,27 +580,28 @@ def start_gui():
                 messagebox.showerror("FFmpeg 错误", str(e))
                 return
 
-        # 调用主处理函数处理单个或批量视频
+            # 调用主处理函数处理单个或批量视频
             handle_batch(input_path, output_path, rows, cols,
                          show_ts, show_idx, font_size,
                          ffmpeg_path, ffprobe_path, log_level)
 
-        # 提示成功
+            # 提示成功
             messagebox.showinfo("完成", "处理完成！请查看输出目录。")
         except Exception as e:
-        # 捕获运行期间的任何异常并提示
+            # 捕获运行期间的任何异常并提示
             messagebox.showerror("错误", str(e))
 
-# 让用户选择路径并赋值给 input 路径变量
+    # 让用户选择路径并赋值给 input 路径变量
     def select_path(mode):
         path = filedialog.askopenfilename() if mode == "file" else filedialog.askdirectory()
         if path:
             input_var.set(path)
 
-# 创建主 Frame 组件用于放置控件
+    # 创建主 Frame 组件用于放置控件
     frm = ttk.Frame(root, padding=10)
     frm.grid(row=0, column=0, sticky="nsew")
-# 设置根窗口和主框架的布局自适应（随窗口缩放）
+
+    # 设置根窗口和主框架的布局自适应（随窗口缩放）
     root.grid_rowconfigure(0, weight=1)
     root.grid_columnconfigure(0, weight=1)
     frm.grid_columnconfigure(0, weight=1)
@@ -640,8 +700,8 @@ def start_gui():
     btn_style = {"width": 20, "padding": 5}     # 所有按钮宽度设置为 20 个字符单位
     						                    # 注：这个 padding 未被实际用于 ttk.Button，可忽略或用于自定义风格
 
-    # 生成缩略图按钮：核心功能入口
-    ttk.Button(button_frame, text="生成缩略图", command=run,
+    ttk.Button(button_frame, text="生成缩略图",
+               command=lambda: threading.Thread(target=run, daemon=True).start(),
                width=btn_style["width"]).grid(row=0, column=0, pady=(0, 5))
 
     # 检查 ffmpeg 工具状态
@@ -656,6 +716,14 @@ def start_gui():
     # 退出程序前保存设置
     ttk.Button(button_frame, text="退出", command=lambda: (save_current_config(), root.destroy()),
                width=btn_style["width"]).grid(row=3, column=0, pady=(5, 0))
+
+    # 创建日志文本框控件
+    log_box = ScrolledText(frm, height=8, state="disabled", wrap="word", font=("Consolas", 10))
+    log_box.grid(row=99, column=0, columnspan=2, sticky="nsew", pady=(15, 0))
+
+    # 重定向 stdout/stderr 到日志框中
+    sys.stdout = TextRedirector(log_box)
+    sys.stderr = TextRedirector(log_box)  # 可选：stderr 也输出到日志框
 
     # 初始化 ffmpeg 选项框显示状态（控制可编辑性）
     toggle_ffmpeg_fields()
