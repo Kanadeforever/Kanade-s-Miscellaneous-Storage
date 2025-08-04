@@ -21,3 +21,11 @@
 - 基本上我提需求与DEBUG，Microsoft Copilot完成代码；
 - 依然有些小问题；
 - it just works!
+
+## SimpleLauncher.py
+
+- 简单的Windows用GUI启动器；
+- 自动扫描所在文件夹下的exe文件，并记录在config.ini中，使用相对路径；
+- 支持命令行参数，在ini文件里的args参数中填写；
+- 有些小问题但懒得修了，it just works!
+- 基本上我提需求与DEBUG，Microsoft Copilot完成代码。
