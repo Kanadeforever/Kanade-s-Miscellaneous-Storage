@@ -22,6 +22,13 @@
 - 依然有些小问题；
 - it just works!
 
+## CHD&CSO_Converter_Frontend_V5_2.pyw
+
+- 为[maxcso](https://github.com/unknownbrackets/maxcso)和[chdman(包含在mame发行版文件内)](https://docs.mamedev.org/tools/chdman.html)写的共用前端的新版本；
+- 基本上我提需求与DEBUG，Microsoft Copilot完成代码；
+- V4的小问题基本解决了，不阻塞线程，也有日志窗口显示进度，虽然还有一些地方不满意但够用了；
+- it just works!
+
 ## SimpleLauncher.py
 
 - 简单的Windows用GUI启动器；
