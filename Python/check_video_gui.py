@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-视频完整性检测工具 GUI 版（美化版）
+视频完整性检测工具 GUI 版（美化版 + 进度条 + 剩余时间估算）
 使用多个 ffmpeg 进程并发检测，每个进程可配置线程数，输出 CSV 报告。
 点击“停止任务”或关闭窗口时自动终止所有任务。
 """
 
 import os, subprocess, time, csv, multiprocessing as mp
 from datetime import datetime
-from tkinter import Tk, Label, Entry, Button, filedialog, StringVar, IntVar, Text, END, Scrollbar, W, Frame, font
+from tkinter import Tk, Label, Entry, Button, filedialog, StringVar, IntVar, Text, END, Scrollbar, W, Frame, font, ttk
 from threading import Thread, Event
 
 stop_flag = Event()
@@ -71,7 +71,7 @@ def check_file(args):
             '耗时（秒）': duration
         }
 
-def run_detection(params, log_widget):
+def run_detection(params, log_widget, progress_var, eta_label):
     stop_flag.clear()
 
     directory, extensions, workers, threads, timeout = params
@@ -85,18 +85,37 @@ def run_detection(params, log_widget):
     tasks = ((f, timeout, threads) for f in videos)
 
     results = []
-    for result in pool.imap_unordered(check_file, tasks):
+    total = len(videos)
+    start_global = time.time()
+
+    for idx, result in enumerate(pool.imap_unordered(check_file, tasks), start=1):
         if stop_flag.is_set():
             break
         results.append(result)
+
         if result['状态'] == '完整':
             log_widget.insert(END, f'完整: {result["文件路径"]}\n')
         else:
             log_widget.insert(END, f'{result["状态"]}: {result["文件路径"]} | 错误信息: {result["错误信息"]}\n')
         log_widget.see(END)
 
+        # 更新进度条
+        progress = int((idx / total) * 100)
+        progress_var.set(progress)
+
+        # 估算剩余时间
+        elapsed = time.time() - start_global
+        avg_time = elapsed / idx
+        remaining = avg_time * (total - idx)
+        hrs, rem = divmod(int(remaining), 3600)
+        mins, secs = divmod(rem, 60)
+        eta_label.config(text=f'剩余时间估算: {hrs:02d}:{mins:02d}:{secs:02d}')
+
     pool.terminate()
     pool.join()
+
+    progress_var.set(0)
+    eta_label.config(text='剩余时间估算: --')
 
     if not stop_flag.is_set():
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -121,10 +140,12 @@ def stop_detection(log_widget):
             text=True,
             shell=True
         )
-        log_widget.insert(END, result.stdout + '\n')
+        if result.returncode == 0:
+            log_widget.insert(END, '成功终止任务！\n')
+        else:
+            log_widget.insert(END, '终止任务失败\n')
     except Exception as e:
-        log_widget.insert(END, f'停止任务失败: {e}\n')
-    log_widget.see(END)
+        log_widget.insert(END, f'终止任务失败: {e}\n')
 
 def launch_gui():
     try:
@@ -135,17 +156,14 @@ def launch_gui():
 
     root = Tk()
     root.title('视频完整性检测工具')
-    root.geometry('820x820')  # 初始窗口大小
-    root.resizable(False, False)  # 不允许缩放
+    root.geometry('820x860')
+    root.resizable(False, False)
 
-    # 设置统一字体
-    from tkinter import font
     default_font = font.nametofont("TkDefaultFont")
     default_font.configure(size=10)
     root.option_add("*Font", default_font)
 
-    # 设置主窗口的自适应权重
-    root.grid_rowconfigure(3, weight=1)  # 日志区所在行
+    root.grid_rowconfigure(3, weight=1)
     root.grid_columnconfigure(0, weight=1)
 
     dir_var = StringVar()
@@ -153,6 +171,8 @@ def launch_gui():
     workers_var = IntVar(value=max(1, mp.cpu_count() // 2))
     threads_var = IntVar(value=1)
     timeout_var = IntVar(value=300)
+
+    progress_var = IntVar()
 
     def browse_dir():
         path = filedialog.askdirectory()
@@ -170,7 +190,7 @@ def launch_gui():
             max(1, threads_var.get()),
             max(1, timeout_var.get())
         )
-        Thread(target=run_detection, args=(params, log), daemon=True).start()
+        Thread(target=run_detection, args=(params, log, progress_var, eta_label), daemon=True).start()
 
     def on_close():
         stop_detection(log)
@@ -178,7 +198,7 @@ def launch_gui():
 
     top_frame = Frame(root, padx=10, pady=10)
     top_frame.grid(row=0, column=0, sticky='ew')
-    top_frame.grid_columnconfigure(1, weight=1)  # 让地址栏自动扩展但不挤压按钮
+    top_frame.grid_columnconfigure(1, weight=1)
 
     param_frame = Frame(root, padx=10, pady=5)
     param_frame.grid(row=1, column=0, sticky='w')
@@ -191,13 +211,22 @@ def launch_gui():
     log_frame.grid_rowconfigure(0, weight=1)
     log_frame.grid_columnconfigure(0, weight=1)
 
+    progress_frame = Frame(root, padx=10, pady=5)
+    progress_frame.grid(row=4, column=0, sticky='ew')
+    progress_frame.grid_columnconfigure(0, weight=1)
+
     scrollbar = Scrollbar(log_frame)
     scrollbar.grid(row=0, column=1, sticky='ns')
 
     log = Text(log_frame, height=12, wrap='none', yscrollcommand=scrollbar.set, bg='#f9f9f9', relief='solid', bd=1)
     log.grid(row=0, column=0, sticky='nsew')
-
     scrollbar.config(command=log.yview)
+
+    progress_bar = ttk.Progressbar(progress_frame, variable=progress_var, maximum=100)
+    progress_bar.grid(row=0, column=0, sticky='ew', padx=5)
+
+    eta_label = Label(progress_frame, text='剩余时间估算: --')
+    eta_label.grid(row=1, column=0, sticky='w', padx=5, pady=2)
 
     Label(top_frame, text='视频目录:').grid(row=0, column=0, sticky=W)
     Entry(top_frame, textvariable=dir_var).grid(row=0, column=1, sticky='ew')
