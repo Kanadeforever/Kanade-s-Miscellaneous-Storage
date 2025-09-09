@@ -36,3 +36,19 @@
 - 支持命令行参数，在ini文件里的args参数中填写；
 - 有些小问题但懒得修了，it just works!
 - 基本上我提需求与DEBUG，Microsoft Copilot完成代码。
+
+## check_video.py
+
+- 简单的检测视频文件完整性的小工具；
+- 需要[FFmpeg](https://ffmpeg.org)的 `ffmpeg.exe`；
+- 使用方法用 `check_video.py -h` 查看；
+- 有bug，搞不定终止子进程，但懒得修了，it just works!
+- 基本上我提需求与DEBUG，Microsoft Copilot完成代码。
+
+## check_video_gui.py
+
+- `check_video.py` 的GUI启动器，但功能大修版，依然需要[FFmpeg](https://ffmpeg.org)的 `ffmpeg.exe`；
+- 基本功能和 `check_video.py` 一致，但用了奇技淫巧让其可以手动终止子进程了；
+- 使用方法已经完全暴露在GUI里，另外只支持选择文件夹，选择单个文件这个懒得改了，有兴趣可以把代码丢给copilot自己提需求改；
+- 支持进度条显示、支持剩余时间估算、高DPI缩放；
+- 基本上我提需求与DEBUG，Microsoft Copilot完成代码。
