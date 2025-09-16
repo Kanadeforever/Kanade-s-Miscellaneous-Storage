@@ -16,6 +16,8 @@ class API:
     def reload(self):
         self.window.load_url(self.url)
 
+    def set_title(self, title: str):
+        self.window.set_title(title)
 
 def ensure_config_exists(config_path: Path):
     if config_path.exists():
@@ -42,6 +44,22 @@ def ensure_config_exists(config_path: Path):
         print(f"首次运行：已生成默认配置文件 → {config_path}")
     except Exception as e:
         sys.exit(f"Error: 无法创建默认配置文件：{e}")
+
+def inject_load_indicator(window, original_title: str):
+    js = f"""
+    (function() {{
+        const orig = "{original_title.replace('"', '\\"')}";
+        // 导航开始：页面卸载前触发
+        window.addEventListener('beforeunload', function() {{
+            window.pywebview.api.set_title("⏳ 加载中… " + orig);
+        }});
+        // 导航完成：DOM 全部就绪后触发
+        window.addEventListener('load', function() {{
+            window.pywebview.api.set_title(orig);
+        }});
+    }})();
+    """
+    window.evaluate_js(js)
 
 def generate_hotkey_js(hotkeys: dict) -> str:
     js_lines = ["document.addEventListener('keydown', function(e) {"]
@@ -87,6 +105,83 @@ def inject_hotkeys(window, hotkeys):
     js_code = generate_hotkey_js(hotkeys)
     window.evaluate_js(js_code)
 
+def inject_context_menu(window, home_url: str, hotkeys: dict):
+    # 构造 JS 中的菜单项数组，自动映射到你的 hotkeys
+    js_items = []
+    # 固定的导航项
+    js_items.append("{ label: '后退',    action: () => history.back() }")
+    js_items.append("{ label: '前进',    action: () => history.forward() }")
+    js_items.append(f"{{ label: '主页',    action: () => location.href = '{home_url}' }}")
+
+    # 动态映射热键动作
+    for action, combo in hotkeys.items():
+        if action == 'Fullscreen':
+            js_action = "window.pywebview.api.toggle_fullscreen()"
+        elif action == 'Reload':
+            js_action = "window.pywebview.api.reload()"
+        elif action == 'ZoomIn':
+            js_action = "let z = parseFloat(document.body.style.zoom) || 1; document.body.style.zoom = z + 0.1"
+        elif action == 'ZoomOut':
+            js_action = "let z = parseFloat(document.body.style.zoom) || 1; document.body.style.zoom = Math.max(z - 0.1, 0.1)"
+        elif action == 'ZoomReset':
+            js_action = "document.body.style.zoom = 1"
+        else:
+            continue
+
+        # 菜单标签里加上组合键提示
+        label = f"{action} ({combo})"
+        js_items.append(
+            "{ label: '%s', action: function() { %s; hide(); } }" % (label, js_action)
+        )
+
+    # 最终注入的 JS
+    js = f"""
+    (function() {{
+        let menu = null;
+        function hide() {{
+            if (menu) {{ document.body.removeChild(menu); menu = null; }}
+        }}
+        document.addEventListener('contextmenu', function(e) {{
+            e.preventDefault();
+            hide();
+            menu = document.createElement('div');
+            Object.assign(menu.style, {{
+                position: 'fixed',
+                top: e.clientY + 'px',
+                left: e.clientX + 'px',
+                background: '#fff',
+                border: '1px solid #ccc',
+                boxShadow: '2px 2px 6px rgba(0,0,0,0.2)',
+                zIndex: 9999,
+                padding: '4px 0',
+                fontSize: '14px',        // 锁定字体大小
+                lineHeight: '1.5',       // 锁定行高
+                userSelect: 'none'
+            }});
+
+            const items = [{','.join(js_items)}];
+            items.forEach(item => {{
+                const el = document.createElement('div');
+                el.className = 'pywebview-context-item';
+                el.innerText = item.label;
+                Object.assign(el.style, {{
+                    padding: '4px 16px',
+                    cursor: 'default',
+                    fontSize: 'inherit',     // 继承容器 font-size
+                    lineHeight: 'inherit'
+                }});
+                el.onmouseenter = () => el.style.background = '#f0f0f0';
+                el.onmouseleave = () => el.style.background = '';
+                el.onclick = () => item.action();
+                menu.appendChild(el);
+            }});
+
+            document.body.appendChild(menu);
+        }});
+        document.addEventListener('click', hide);
+    }})();"""
+    window.evaluate_js(js)
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="启动 WebView 应用（TOML + 快捷键 + 全屏支持）"
@@ -123,9 +218,10 @@ def main():
     height     = int(app.get('Height', 768))
     fullscreen = bool(app.get('Fullscreen', False))
     on_top     = bool(app.get('OnTop', False))
+    original_title = title
 
     window = webview.create_window(
-        title=title,
+        title=original_title,
         url=url,
         width=width,
         height=height,
@@ -134,15 +230,20 @@ def main():
     )
 
     api = API(window, url)
-    window.expose(api.toggle_fullscreen, api.reload)
+    window.expose(
+        api.toggle_fullscreen,
+        api.reload,
+        api.set_title
+    )
 
     # 每次页面加载完成后重新注入快捷键
     def on_loaded(window):
         inject_hotkeys(window, hotkeys)
+        inject_context_menu(window, url, hotkeys)
+        inject_load_indicator(window, original_title)
 
     window.events.loaded += on_loaded
     webview.start()
-
 
 if __name__ == '__main__':
     main()
