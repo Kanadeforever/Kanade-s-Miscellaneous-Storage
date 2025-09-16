@@ -8,7 +8,7 @@ import json
 import traceback
 from pathlib import Path
 from datetime import datetime
-
+import threading
 import tkinter as tk
 import webview
 
@@ -41,6 +41,7 @@ def run(window, api):
         root = tk.Tk()
         root.title("Plugins Manager")
         root.geometry("600x300")
+
         root.protocol("WM_DELETE_WINDOW", root.destroy)
         root.bind("<Escape>", lambda e: root.destroy())  # ESC 关闭窗口
 
@@ -136,6 +137,7 @@ def run(window, api):
         lb.bind("<Up>", shift_move)
         lb.bind("<Down>", shift_move)
 
+        center_window(root)
         root.mainloop()
 
     api._plugin_callbacks["open_plugin_manager"] = open_plugin_manager
@@ -155,31 +157,40 @@ def run(window, api):
 
 HOTKEYS_PLUGIN_NAME    = "hotkeys.py"
 HOTKEYS_PLUGIN_CONTENT = r'''
-import textwrap, logging
+import logging
 
 def run(window, api):
     logging.info("hotkeys: run() called")
 
-    window.events.loaded += lambda: window.evaluate_js(textwrap.dedent("""
-        console.log("hotkeys: JS injected");
-        setTimeout(() => {
-            window.addEventListener('keydown', e => {
-                console.log("hotkeys keydown:", e.key);
-                if (e.key === 'F11') {
-                    if (window.pywebview?.api?.toggle_fullscreen) {
-                        window.pywebview.api.toggle_fullscreen().then(() => {
-                            console.log("hotkeys: fullscreen toggled");
-                        }).catch(err => {
-                            console.error("hotkeys: toggle failed", err);
-                        });
-                    }
+    js_code = """
+        document.addEventListener("keydown", function(e) {
+            const ctrl = e.ctrlKey || e.metaKey;
+            const shift = e.shiftKey;
+
+            // Ctrl+R or F5 → Reload
+            if ((ctrl && e.key === "r") || e.key === "F5") {
+                location.reload();
+                e.preventDefault();
+            }
+
+            // Ctrl+Shift+R → Hard reload (simulate)
+            if (ctrl && shift && e.key === "R") {
+                location.href = location.href;
+                e.preventDefault();
+            }
+
+            // F11 → Toggle fullscreen via Python API
+            if (e.key === "F11") {
+                if (window.pywebview && window.pywebview.api) {
+                    window.pywebview.api.toggle_fullscreen();
+                    e.preventDefault();
                 }
-                if (e.key === 'F5') {
-                    location.reload();
-                }
-            });
-        }, 500);
-    """))
+            }
+        });
+    """
+    api.inject_js(js_code)
+    logging.info("hotkeys: JS 注入完成")
+
 '''.lstrip('\n')
 
 RESIZE_NOTIFIER_PLUGIN_NAME    = "resize_notifier.py"
@@ -203,69 +214,128 @@ document.body.style.zoom = window.devicePixelRatio || 1;
 CONTEXT_PLUGIN_NAME    = "context_menu.py"
 CONTEXT_PLUGIN_CONTENT = r'''
 import logging
-import textwrap
 
 def run(window, api):
     logging.info("context_menu: run() called")
 
-    # 注入 HTML + CSS + JS 一体化上下文菜单
-    window.events.loaded += lambda: window.evaluate_js(textwrap.dedent("""
-        console.log("context_menu: injecting HTML menu");
+    js_code = r"""
+        // 强制允许选中
+        document.body.style.userSelect = "text";
 
-        const menu = document.createElement('div');
-        menu.id = 'custom-context-menu';
-        menu.style.position = 'absolute';
-        menu.style.display = 'none';
-        menu.style.zIndex = '9999';
-        menu.style.background = '#fff';
-        menu.style.border = '1px solid #ccc';
-        menu.style.boxShadow = '2px 2px 6px rgba(0,0,0,0.2)';
-        menu.style.fontFamily = 'Arial, sans-serif';
-        menu.style.fontSize = '14px';
-        menu.style.minWidth = '160px';
+        // 移除禁止选中的事件监听
+        document.addEventListener("selectstart", e => e.stopPropagation(), true);
+        document.addEventListener("mousedown", e => e.stopPropagation(), true);
 
-        function addItem(label, callback) {
-            const item = document.createElement('div');
-            item.textContent = label;
-            item.style.padding = '8px 12px';
-            item.style.cursor = 'pointer';
-            item.onmouseenter = () => item.style.background = '#f0f0f0';
-            item.onmouseleave = () => item.style.background = '#fff';
-            item.onclick = () => {
+        const menu = document.createElement("div");
+        menu.id = "custom-context-menu";
+        menu.style.position = "fixed";
+        menu.style.zIndex = "9999";
+        menu.style.background = "#fff";
+        menu.style.border = "1px solid #ccc";
+        menu.style.boxShadow = "2px 2px 6px rgba(0,0,0,0.2)";
+        menu.style.display = "none";
+        menu.style.padding = "8px 0";
+        menu.style.fontFamily = "Segoe UI, sans-serif";
+        menu.style.minWidth = "180px";
+
+        const items = [
+            { label: "🔙 后退", action: () => history.back() },
+            { label: "🔜 前进", action: () => history.forward() },
+            { label: "🏠 返回主页", action: () => location.href = window.location.origin },
+            { label: "🔄 刷新页面", action: () => location.reload() },
+            { label: "🖥️ 切换全屏", action: () => {
+                if (window.pywebview && window.pywebview.api) {
+                    window.pywebview.api.toggle_fullscreen();
+                }
+            }},
+            { label: "🕵️ 查看页面信息", action: () => {
+                const info = {
+                    "📄 页面标题": document.title,
+                    "🔗 页面地址": location.href,
+                    "↩️ 页面来源": document.referrer || "无",
+                    "🖥️ 分辨率": window.innerWidth + " × " + window.innerHeight,
+                    "🌐 浏览器 UA": navigator.userAgent,
+                    "🗣️ 语言": navigator.language,
+                    "🖥️ 是否全屏": document.fullscreenElement ? "是" : "否",
+                    "⏱️ 插件注入时间": new Date().toLocaleString()
+                };
+
+                const overlay = document.createElement("div");
+                overlay.style.position = "fixed";
+                overlay.style.top = "0"; overlay.style.left = "0";
+                overlay.style.width = "100%"; overlay.style.height = "100%";
+                overlay.style.background = "rgba(0,0,0,0.3)";
+                overlay.style.zIndex = "9999";
+
+                const box = document.createElement("div");
+                box.style.background = "#fff";
+                box.style.padding = "20px";
+                box.style.margin = "5% auto";
+                box.style.width = "80%";
+                box.style.maxWidth = "600px";
+                box.style.borderRadius = "8px";
+                box.style.boxShadow = "0 4px 12px rgba(0,0,0,0.2)";
+                box.style.fontFamily = "Segoe UI, sans-serif";
+                box.style.whiteSpace = "pre-wrap";
+
+                const title = document.createElement("h2");
+                title.textContent = "🕵️ 页面信息";
+                title.style.marginBottom = "10px";
+                box.appendChild(title);
+
+                const pre = document.createElement("pre");
+                pre.style.userSelect = "text";
+                pre.style.fontSize = "14px";
+                pre.style.lineHeight = "1.6";
+                pre.style.whiteSpace = "pre-wrap";
+                pre.style.wordBreak = "break-word";  // ✅ 自动换行长行内容
+                pre.textContent = Object.entries(info).map(function([k, v]) {
+                    return k + ": " + v;
+                }).join("\n");
+                box.appendChild(pre);
+
+                const closeBtn = document.createElement("button");
+                closeBtn.textContent = "关闭";
+                closeBtn.style.marginTop = "10px";
+                closeBtn.onclick = () => document.body.removeChild(overlay);
+                box.appendChild(closeBtn);
+
+                overlay.appendChild(box);
+                document.body.appendChild(overlay);
+            }},
+            { label: "❌ 关闭菜单", action: () => hideMenu() }
+        ];
+
+        items.forEach(item => {
+            const btn = document.createElement("div");
+            btn.textContent = item.label;
+            btn.style.padding = "6px 16px";
+            btn.style.cursor = "pointer";
+            btn.onmouseover = () => btn.style.background = "#eee";
+            btn.onmouseout = () => btn.style.background = "#fff";
+            btn.onclick = () => {
+                item.action();
                 hideMenu();
-                callback();
             };
-            menu.appendChild(item);
-        }
-
-        addItem('刷新页面', () => location.reload());
-        addItem('切换全屏', () => {
-            if (window.pywebview?.api?.toggle_fullscreen) {
-                window.pywebview.api.toggle_fullscreen();
-            }
+            menu.appendChild(btn);
         });
-        addItem('关闭菜单', () => hideMenu());
 
         document.body.appendChild(menu);
 
-        function showMenu(x, y) {
-            menu.style.left = x + 'px';
-            menu.style.top = y + 'px';
-            menu.style.display = 'block';
-        }
-
-        function hideMenu() {
-            menu.style.display = 'none';
-        }
-
-        document.addEventListener('contextmenu', e => {
+        document.addEventListener("contextmenu", function(e) {
             e.preventDefault();
-            const scale = window.devicePixelRatio || 1;
-            showMenu(e.clientX, e.clientY);
+            menu.style.left = e.pageX + "px";
+            menu.style.top = e.pageY + "px";
+            menu.style.display = "block";
         });
 
-        document.addEventListener('click', hideMenu);
-    """))
+        document.addEventListener("click", hideMenu);
+        function hideMenu() {
+            menu.style.display = "none";
+        }
+    """
+    api.inject_js(js_code)
+    logging.info("context_menu: JS 注入完成")
 '''.lstrip('\n')
 
 TEMPLATE_NAME = "config_template.toml"
@@ -292,47 +362,62 @@ context_menu    = true
 TEMPLATE_PLUGIN_NAME = "[DEMO]_template.py"
 TEMPLATE_PLUGIN_CONTENT = r'''
 # PLUGIN-DISABLE
-# 插件模板：template.py
-# 插件模板不可以放进【modules】目录内，否则会出问题
-# 编写好的插件则需要放进【modules】目录内，否则不加载
 # ----------------------------------------
-# 每个插件必须定义一个名为 run(window, api) 的函数
+# 插件模板（适配内置 js_injector）：
+# ----------------------------------------
+# ✅ 插件说明：
+# 本插件是一个最简单的示例，展示如何使用主脚本提供的 API 注入 JS，
+# 并在本地写入一个 JSON 文件作为插件运行记录。
+#
+# ✅ 使用方法：
+# 1. 将本文件放入【modules】目录内
+# 2. 确保 config.toml 中 [Modules] 区块启用了该插件（如 hello_plugin = true）
+# 3. 启动主程序，插件将在页面加载后自动运行
+
+# ✅ 插件要求：
+# 每个插件必须定义一个 run(window, api) 函数
 # window: 当前 WebView 窗口对象，可用于注入 JS、绑定事件等
-# api: 主脚本提供的 API 实例，可调用如 toggle_fullscreen() 等方法
-# 插件运行在隔离作用域中，已注入以下变量供使用：
-# - logging, json, Path, sys
-# - config_data, app_cfg, mod_cfg
-# - data_dir, window, api
-# - atomic_write, enable_high_dpi
+# api: 主脚本提供的 API 实例，可调用如 toggle_fullscreen()、inject_js() 等方法
 
 def run(window, api):
-    # 示例：注入 JS（在页面加载完成后执行）
-    def inject():
-        js = """
-            console.log("插件 template.py 已注入");
-            // 可在此添加自定义 JS 逻辑
-        """
-        window.evaluate_js(js)
+    logging.info("✅ hello_plugin: run() called")
 
-    window.events.loaded += inject
-    logging.info("插件 template.py 已加载")
+    # ✅ 使用主脚本提供的 API 注入 JS（无需自己绑定事件）
+    js_code = """
+        console.log("✅ Hello 插件已注入！");
+        document.body.style.backgroundColor = "#f0f8ff";  // 修改背景色
+    """
+    api.inject_js(js_code)
 
-    # 示例：写入插件数据文件
-    output = data_dir / "template_output.json"
-    atomic_write(output, json.dumps({"status": "ok"}))
+    # ✅ 写入插件运行记录到本地 data 目录
+    output_path = data_dir / "hello_plugin_output.json"
+    atomic_write(output_path, json.dumps({
+        "plugin": "hello_plugin",
+        "status": "success",
+        "timestamp": __import__("datetime").datetime.now().isoformat()
+    }))
 
-    # 示例：根据配置做出行为
+    # ✅ 如果配置中启用了全屏，则自动切换
     if app_cfg.get("Fullscreen"):
         api.toggle_fullscreen()
+        logging.info("✅ hello_plugin: 已根据配置切换为全屏模式")
 
-    # 示例：创建一个 Tk 弹窗（需启用 DPI 感知）
-    # enable_high_dpi()
-    # import tkinter as tk
-    # root = tk.Tk(); root.title("插件弹窗")
-    # tk.Label(root, text="Hello from plugin!").pack()
-    # root.mainloop()
+# ----------------------------------------
+# 教程（适配 js_injector）：
+# ----------------------------------------
 
-    # window.events.loaded += lambda: window.evaluate_js(js)
+# ✅ 如何注入 JS？
+    # 你不需要自己写 window.events.loaded += ...，只需调用：
+# 【        api.inject_js("console.log('Hello from plugin!');")     】
+    # 主脚本已经帮你处理了事件绑定和作用域隔离，你只管写 JS 字符串即可。
+
+# ✅ 插件能做什么？
+        # 1.注入 JS 修改网页行为或样式
+        # 2.写入本地文件记录插件状态
+        # 3.调用主脚本 API（如切换全屏）
+        # 4.弹出 Tk 窗口（可选）
+        # 5.读取或修改配置项
+
 # PLUGIN-DISABLE
 '''.lstrip('\n')
 
@@ -384,30 +469,57 @@ def enable_high_dpi() -> None:
         except Exception:
             pass
 
+def center_window(win: tk.Toplevel | tk.Tk):
+    win.update_idletasks()
+    width = win.winfo_width()
+    height = win.winfo_height()
+    screen_w = win.winfo_screenwidth()
+    screen_h = win.winfo_screenheight()
+    x = (screen_w - width) // 2
+    y = (screen_h - height) // 2
+    win.geometry(f"{width}x{height}+{x}+{y}")
+
+_active_errors: list[tk.Toplevel] = []
+
 def show_error(title: str, message: str) -> None:
     """弹窗显示错误并退出。"""
-    enable_high_dpi()
-    root = tk.Tk(); root.withdraw()
+    def popup():
+        if len(_active_errors) >= 3:
+            return  # 限制最多3个弹窗同时存在
 
-    win = tk.Toplevel(root)
-    win.title(title)
-    win.geometry("500x300")
-    win.minsize(300, 200)  # 设置最小尺寸，防止过小导致布局崩溃
+        enable_high_dpi()
+        root = tk.Tk()
+        root.withdraw()
 
-    # 使用 grid 布局，确保文本框和按钮都能自适应
-    win.grid_rowconfigure(0, weight=1)
-    win.grid_columnconfigure(0, weight=1)
+        win = tk.Toplevel(root)
 
-    txt = tk.Text(win, wrap="word")
-    txt.insert("1.0", message)
-    txt.config(state="disabled")
-    txt.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 0))
+        win.title(title)
+        win.geometry("500x300")
+        win.minsize(300, 200)  # 设置最小尺寸，防止过小导致布局崩溃
 
-    btn = tk.Button(win, text="退出", command=lambda: sys.exit(1))
-    btn.grid(row=1, column=0, sticky="ew", padx=10, pady=10)
+        win.grid_rowconfigure(0, weight=1)
+        win.grid_columnconfigure(0, weight=1)
 
-    win.protocol("WM_DELETE_WINDOW", lambda: sys.exit(1))
-    win.mainloop()
+        txt = tk.Text(win, wrap="word")
+        txt.insert("1.0", message)
+        txt.config(state="disabled")
+        txt.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 0))
+
+        btn = tk.Button(win, text="关闭", command=win.destroy)
+        btn.grid(row=1, column=0, sticky="ew", padx=10, pady=10)
+
+        def on_close():
+            if win in _active_errors:
+                _active_errors.remove(win)
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
+        _active_errors.append(win)
+        # 自动居中
+        center_window(win)
+        win.mainloop()
+
+    threading.Thread(target=popup, daemon=True).start()
 
 def dump_toml(data: dict) -> str:
     """简单序列化 dict 为 TOML 格式（仅支持一级 section 和基本类型）。"""
@@ -653,10 +765,11 @@ class PluginManager:
             "app_cfg": self.cfg.app,
             "mod_cfg": self.cfg.mods,
             "cfg": self.cfg,
-            "atomic_write": atomic_write,
-            "enable_high_dpi": enable_high_dpi,
             "window": window,
-            "api": api
+            "api": api,
+            "atomic_write": atomic_write,
+            "center_window":center_window,
+            "enable_high_dpi": enable_high_dpi
         }
         try:
             exec(py.read_text(encoding="utf-8"), scope)
@@ -668,6 +781,7 @@ class PluginManager:
                 logging.warning(f"{py.name} 缺少 run() 方法")
         except Exception as e:
             logging.error(f"插件加载失败：{py.name} - {e}")
+            show_error(f"插件加载失败：{py.name}", str(e))
 
 # -----------------------------------------------------------------------------
 # 主流程
@@ -745,8 +859,8 @@ def find_or_create_config(explicit: Path | None = None) -> Path:
     btn = tk.Button(root, text="选择", command=confirm)
     btn.grid(row=1, column=0, sticky="ew", padx=10, pady=10)
 
+    center_window(root)
     root.mainloop()
-
 
     if not chosen["file"]:
         sys.exit("未选择配置，程序退出。")
