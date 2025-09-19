@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>增强版 Markdown 编辑器</title>
+    <title>简易Markdown编辑器</title>
     <!-- 引入Marked.js库 -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <!-- 引入DOMPurify防止XSS攻击 -->
@@ -19,6 +19,7 @@
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background-color: #f6f8fa;
             color: #24292e;
+            overflow: hidden;
         }
         
         .header {
@@ -64,9 +65,18 @@
             background-color: #4b5563;
         }
         
+        .btn-info {
+            background-color: #0ea5e9;
+        }
+        
+        .btn-info:hover {
+            background-color: #0284c7;
+        }
+        
         .editor-container {
             display: flex;
             height: calc(100vh - 60px);
+            position: relative;
         }
         
         .editor-panel {
@@ -84,6 +94,9 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 10;
         }
         
         #editor {
@@ -104,6 +117,31 @@
             height: calc(100% - 41px);
             overflow: auto;
             background-color: white;
+            position: relative;
+        }
+        
+        .sync-indicator {
+            position: absolute;
+            right: 0;
+            top: 41px;
+            width: 4px;
+            background-color: #3b83f6;
+            opacity: 0.7;
+            z-index: 5;
+            display: none;
+        }
+        
+        #preview .sync-indicator {
+            left: 0;
+            right: auto;
+        }
+        
+        .cursor-position {
+            font-size: 12px;
+            color: #6b7280;
+            background-color: #e5e7eb;
+            padding: 2px 8px;
+            border-radius: 4px;
         }
         
         /* Markdown样式 */
@@ -218,10 +256,163 @@
             border-radius: 6px;
             opacity: 0;
             transition: opacity 0.3s;
+            z-index: 100;
         }
         
         .status-message.show {
             opacity: 1;
+        }
+        
+        .sync-toggle {
+            display: flex;
+            align-items: center;
+            margin-right: 15px;
+            font-size: 14px;
+        }
+        
+        .sync-toggle input {
+            margin-right: 5px;
+        }
+        
+        /* 模态框样式 */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(0, 0, 0, 0.5);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s ease;
+        }
+        
+        .modal-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+        
+        .modal {
+            background-color: white;
+            border-radius: 8px;
+            width: 80%;
+            max-width: 900px;
+            height: 80%;
+            display: flex;
+            overflow: hidden;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+        }
+        
+        .modal-sidebar {
+            width: 200px;
+            background-color: #f8f9fa;
+            border-right: 1px solid #e1e4e8;
+            padding: 20px 0;
+            overflow-y: auto;
+        }
+        
+        .modal-content {
+            flex: 1;
+            padding: 25px;
+            overflow-y: auto;
+        }
+        
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 25px 15px;
+            border-bottom: 1px solid #e1e4e8;
+            margin-bottom: 20px;
+        }
+        
+        .modal-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+        
+        .close-modal {
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: #6b7280;
+        }
+        
+        .close-modal:hover {
+            color: #374151;
+        }
+        
+        .tab-button {
+            display: block;
+            width: 100%;
+            padding: 12px 20px;
+            background: none;
+            border: none;
+            text-align: left;
+            cursor: pointer;
+            font-size: 14px;
+            color: #4b5563;
+            transition: all 0.2s;
+            border-left: 3px solid transparent;
+        }
+        
+        .tab-button:hover {
+            background-color: #edf2f7;
+            color: #2d3748;
+        }
+        
+        .tab-button.active {
+            background-color: #ebf4ff;
+            color: #3b83f6;
+            border-left-color: #3b83f6;
+            font-weight: 500;
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        .info-section {
+            margin-bottom: 25px;
+        }
+        
+        .info-section h3 {
+            margin-bottom: 12px;
+            color: #374151;
+            font-size: 1.2rem;
+        }
+        
+        .info-section p {
+            margin-bottom: 10px;
+            line-height: 1.6;
+            color: #4b5563;
+        }
+        
+        .info-section ul, .info-section ol {
+            margin-left: 20px;
+            margin-bottom: 15px;
+        }
+        
+        .info-section li {
+            margin-bottom: 8px;
+            line-height: 1.5;
+        }
+        
+        .info-section code {
+            background-color: #edf2f7;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: monospace;
+            color: #2d3748;
         }
         
         /* 响应式设计 */
@@ -233,13 +424,41 @@
             .editor-panel {
                 height: 50%;
             }
+            
+            .modal {
+                width: 95%;
+                height: 90%;
+                flex-direction: column;
+            }
+            
+            .modal-sidebar {
+                width: 100%;
+                border-right: none;
+                border-bottom: 1px solid #e1e4e8;
+                padding: 10px 0;
+                overflow-x: auto;
+                display: flex;
+            }
+            
+            .tab-button {
+                padding: 10px 15px;
+                white-space: nowrap;
+                border-left: none;
+                border-bottom: 3px solid transparent;
+            }
+            
+            .tab-button.active {
+                border-left-color: transparent;
+                border-bottom-color: #3b83f6;
+            }
         }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>Markdown编辑器</h1>
+        <h1>Markdown编辑器 By DeepSeek with Luminous</h1>
         <div class="header-actions">
+            <button id="info-btn" class="btn btn-info">说明</button>
             <button id="load-btn" class="btn btn-secondary">载入</button>
             <button id="save-btn" class="btn">保存</button>
         </div>
@@ -249,12 +468,23 @@
         <div class="editor-panel">
             <div class="panel-header">
                 <span>编辑区</span>
-                <span id="char-count">0 字符</span>
+                <div>
+                    <span id="char-count">0 字符</span>
+                    <span class="cursor-position" id="cursor-position">行: 1, 列: 1</span>
+                </div>
             </div>
+            <div class="sync-indicator" id="editor-sync-indicator"></div>
             <textarea id="editor" placeholder="开始编写 Markdown..."></textarea>
         </div>
         <div class="editor-panel">
-            <div class="panel-header">预览区</div>
+            <div class="panel-header">
+                <span>预览区</span>
+                <div class="sync-toggle">
+                    <input type="checkbox" id="sync-scroll" checked>
+                    <label for="sync-scroll">同步滚动</label>
+                </div>
+            </div>
+            <div class="sync-indicator" id="preview-sync-indicator"></div>
             <div id="preview"></div>
         </div>
     </div>
@@ -262,15 +492,219 @@
     <input type="file" id="file-input" style="display: none;" accept=".md,.txt,.markdown">
     
     <div class="status-message" id="status-message"></div>
+    
+    <!-- 说明模态框 -->
+    <div class="modal-overlay" id="info-modal">
+        <div class="modal">
+            <div class="modal-sidebar">
+                <button class="tab-button active" data-tab="intro">功能简介</button>
+                <button class="tab-button" data-tab="storage">本地存储说明</button>
+                <button class="tab-button" data-tab="markdown">Markdown语法</button>
+                <button class="tab-button" data-tab="shortcuts">快捷键</button>
+            </div>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2 class="modal-title">编辑器使用说明</h2>
+                    <button class="close-modal" id="close-modal">&times;</button>
+                </div>
+                
+                <div class="tab-content active" id="intro-content">
+                    <div class="info-section">
+                        <h3>欢迎使用Markdown编辑器</h3>
+                        <p>这是一个功能强大的Markdown编辑器，支持实时预览和多种实用功能。</p>
+                    </div>
+                    
+                    <div class="info-section">
+                        <h3>主要功能</h3>
+                        <ul>
+                            <li><strong>实时预览</strong> - 左侧编辑，右侧即时预览效果</li>
+                            <li><strong>同步滚动</strong> - 编辑区和预览区同步滚动，方便对照</li>
+                            <li><strong>本地存储</strong> - 内容自动保存到浏览器本地存储</li>
+                            <li><strong>文件操作</strong> - 支持导入和导出Markdown文件</li>
+                            <li><strong>语法高亮</strong> - 代码块语法高亮显示</li>
+                            <li><strong>响应式设计</strong> - 适配各种屏幕尺寸</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="info-section">
+                        <h3>基本使用</h3>
+                        <p>1. 在左侧编辑区编写Markdown内容</p>
+                        <p>2. 右侧预览区会实时显示渲染结果</p>
+                        <p>3. 使用顶部按钮保存或加载内容</p>
+                        <p>4. 通过"同步滚动"开关控制是否同步两侧滚动位置</p>
+                    </div>
+                </div>
+                
+                <div class="tab-content" id="storage-content">
+                    <div class="info-section">
+                        <h3>本地存储功能</h3>
+                        <p>您的Markdown内容可以保存到浏览器的本地存储中：</p>
+                        <ul>
+                            <li><strong>保存到本地存储</strong>：内容将存储在您的浏览器中</li>
+                            <li><strong>下载为文件</strong>：内容将保存为.md文件到您的电脑</li>
+                            <li><strong>从本地存储加载</strong>：从浏览器存储中恢复您的内容</li>
+                            <li><strong>从文件加载</strong>：从您的电脑选择Markdown文件</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="info-section">
+                        <h3>本地存储的特点</h3>
+                        <ul>
+                            <li><strong>持久性</strong>：即使关闭浏览器，内容也不会丢失</li>
+                            <li><strong>域名特定</strong>：每个网站有自己的存储空间</li>
+                            <li><strong>容量限制</strong>：通常每个域名有5MB左右的存储空间</li>
+                            <li><strong>易于访问</strong>：通过JavaScript可以轻松读写</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="info-section">
+                        <h3>查看本地存储内容</h3>
+                        <p>您可以通过浏览器开发者工具查看本地存储的内容：</p>
+                        <ol>
+                            <li>按F12打开开发者工具</li>
+                            <li>切换到"Application"（应用程序）标签</li>
+                            <li>展开"Local Storage"并选择当前网站</li>
+                            <li>您将看到保存的"markdownContent"键及其值</li>
+                        </ol>
+                    </div>
+                    
+                    <div class="info-section">
+                        <h3>代码示例</h3>
+                        <pre><code>// 保存内容到本地存储
+localStorage.setItem('markdownContent', content);
+
+// 从本地存储读取内容
+const savedContent = localStorage.getItem('markdownContent');
+
+// 删除本地存储的内容
+localStorage.removeItem('markdownContent');</code></pre>
+                    </div>
+                </div>
+                
+                <div class="tab-content" id="markdown-content">
+                    <div class="info-section">
+                        <h3>Markdown基本语法</h3>
+                        <p>Markdown是一种轻量级标记语言，可以让您使用简单的语法格式编写文档。</p>
+                    </div>
+                    
+                    <div class="info-section">
+                        <h3>标题</h3>
+                        <pre><code># 一级标题
+## 二级标题
+### 三级标题
+#### 四级标题</code></pre>
+                    </div>
+                    
+                    <div class="info-section">
+                        <h3>文本样式</h3>
+                        <pre><code>*斜体文本*
+**粗体文本**
+~~删除线文本~~
+`代码片段`</code></pre>
+                    </div>
+                    
+                    <div class="info-section">
+                        <h3>列表</h3>
+                        <pre><code>- 无序列表项
+- 无序列表项
+  - 嵌套列表项
+
+1. 有序列表项
+2. 有序列表项
+   1. 嵌套列表项</code></pre>
+                    </div>
+                    
+                    <div class="info-section">
+                        <h3>链接和图片</h3>
+                        <pre><code>[链接文本](https://example.com)
+![图片描述](image.jpg)</code></pre>
+                    </div>
+                    
+                    <div class="info-section">
+                        <h3>代码块</h3>
+                        <pre><code>```javascript
+function example() {
+    console.log('Hello, World!');
+}
+```</code></pre>
+                    </div>
+                    
+                    <div class="info-section">
+                        <h3>引用</h3>
+                        <pre><code>> 这是一个引用
+>> 嵌套引用</code></pre>
+                    </div>
+                    
+                    <div class="info-section">
+                        <h3>表格</h3>
+                        <pre><code>| 标题1 | 标题2 | 标题3 |
+|-------|-------|-------|
+| 单元格 | 单元格 | 单元格 |
+| 单元格 | 单元格 | 单元格 |</code></pre>
+                    </div>
+                </div>
+                
+                <div class="tab-content" id="shortcuts-content">
+                    <div class="info-section">
+                        <h3>编辑器快捷键</h3>
+                        <p>这部分基本随缘，看个乐子就行，别当真</p>
+                        <p>以下快捷键可以帮助您提高编辑效率：</p>
+                    </div>
+                    
+                    <div class="info-section">
+                        <h3>文本格式快捷键</h3>
+                        <ul>
+                            <li><strong>Ctrl+B</strong> - 粗体文本</li>
+                            <li><strong>Ctrl+I</strong> - 斜体文本</li>
+                            <li><strong>Ctrl+K</strong> - 插入链接</li>
+                            <li><strong>Ctrl+Shift+I</strong> - 插入图片</li>
+                            <li><strong>Ctrl+Shift+C</strong> - 插入代码块</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="info-section">
+                        <h3>操作快捷键</h3>
+                        <ul>
+                            <li><strong>Ctrl+S</strong> - 保存内容</li>
+                            <li><strong>Ctrl+O</strong> - 打开文件</li>
+                            <li><strong>Ctrl+Z</strong> - 撤销</li>
+                            <li><strong>Ctrl+Y</strong> - 重做</li>
+                            <li><strong>Ctrl+F</strong> - 查找</li>
+                            <li><strong>Ctrl+H</strong> - 替换</li>
+                        </ul>
+                    </div>
+                    
+                    <div class="info-section">
+                        <h3>导航快捷键</h3>
+                        <ul>
+                            <li><strong>Ctrl+Home</strong> - 跳到文档开头</li>
+                            <li><strong>Ctrl+End</strong> - 跳到文档末尾</li>
+                            <li><strong>Ctrl+←/→</strong> - 按单词移动光标</li>
+                            <li><strong>Ctrl+↑/↓</strong> - 滚动而不移动光标</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <script>
         const editor = document.getElementById('editor');
         const preview = document.getElementById('preview');
         const saveBtn = document.getElementById('save-btn');
         const loadBtn = document.getElementById('load-btn');
+        const infoBtn = document.getElementById('info-btn');
         const fileInput = document.getElementById('file-input');
         const charCount = document.getElementById('char-count');
+        const cursorPosition = document.getElementById('cursor-position');
         const statusMessage = document.getElementById('status-message');
+        const syncScrollCheckbox = document.getElementById('sync-scroll');
+        const editorSyncIndicator = document.getElementById('editor-sync-indicator');
+        const previewSyncIndicator = document.getElementById('preview-sync-indicator');
+        const infoModal = document.getElementById('info-modal');
+        const closeModal = document.getElementById('close-modal');
+        const tabButtons = document.querySelectorAll('.tab-button');
+        const tabContents = document.querySelectorAll('.tab-content');
         
         // 配置marked
         marked.setOptions({
@@ -310,7 +744,11 @@
                 localStorage.setItem('markdownContent', editor.value);
                 showStatusMessage('内容已保存到本地存储');
             } catch (e) {
-                showStatusMessage('保存失败: ' + e.message);
+                if (e.name === 'QuotaExceededError') {
+                    showStatusMessage('保存失败: 本地存储空间不足');
+                } else {
+                    showStatusMessage('保存失败: ' + e.message);
+                }
             }
         }
         
@@ -367,12 +805,99 @@
             reader.readAsText(file);
         }
         
+        // 更新光标位置显示
+        function updateCursorPosition() {
+            const cursorPos = editor.selectionStart;
+            const textBeforeCursor = editor.value.substring(0, cursorPos);
+            const lines = textBeforeCursor.split('\n');
+            const line = lines.length;
+            const column = lines[lines.length - 1].length + 1;
+            
+            cursorPosition.textContent = `行: ${line}, 列: ${column}`;
+        }
+        
+        // 同步滚动功能
+        let isSyncingScroll = false;
+        
+        function syncScroll(from, to, indicator) {
+            if (!syncScrollCheckbox.checked || isSyncingScroll) return;
+            
+            isSyncingScroll = true;
+            
+            const fromScrollPercent = from.scrollTop / (from.scrollHeight - from.clientHeight);
+            const toScrollTop = fromScrollPercent * (to.scrollHeight - to.clientHeight);
+            
+            to.scrollTop = toScrollTop;
+            
+            // 显示同步指示器
+            if (indicator) {
+                const indicatorHeight = Math.max(30, from.clientHeight * 0.3);
+                indicator.style.height = `${indicatorHeight}px`;
+                indicator.style.top = `${41 + fromScrollPercent * (from.clientHeight - indicatorHeight)}px`;
+                indicator.style.display = 'block';
+                
+                setTimeout(() => {
+                    indicator.style.display = 'none';
+                }, 1000);
+            }
+            
+            setTimeout(() => {
+                isSyncingScroll = false;
+            }, 100);
+        }
+        
+        // 打开说明模态框
+        function openInfoModal() {
+            infoModal.classList.add('active');
+        }
+        
+        // 关闭说明模态框
+        function closeInfoModal() {
+            infoModal.classList.remove('active');
+        }
+        
+        // 切换标签页
+        function switchTab(tabName) {
+            // 更新按钮状态
+            tabButtons.forEach(button => {
+                if (button.dataset.tab === tabName) {
+                    button.classList.add('active');
+                } else {
+                    button.classList.remove('active');
+                }
+            });
+            
+            // 更新内容显示
+            tabContents.forEach(content => {
+                if (content.id === `${tabName}-content`) {
+                    content.classList.add('active');
+                } else {
+                    content.classList.remove('active');
+                }
+            });
+        }
+        
         // 事件监听
         editor.addEventListener('input', updatePreview);
+        editor.addEventListener('scroll', () => {
+            syncScroll(editor, preview, previewSyncIndicator);
+        });
+        editor.addEventListener('click', updateCursorPosition);
+        editor.addEventListener('keyup', updateCursorPosition);
+        
+        preview.addEventListener('scroll', () => {
+            syncScroll(preview, editor, editorSyncIndicator);
+        });
+        
+        // 添加光标移动事件监听
+        editor.addEventListener('keydown', function(e) {
+            // 在按键释放后更新光标位置
+            setTimeout(updateCursorPosition, 0);
+        });
         
         saveBtn.addEventListener('click', () => {
             // 提供两种保存方式：本地存储和文件下载
-            if (confirm('请选择保存方式:\n\n确定 - 保存到本地存储\n取消 - 下载为文件')) {
+            if (confirm('请选择保存方式:\n\n确定 - 保存到本地存储 (存储在浏览器中)\n取消 - 下载为文件 (保存到电脑)')) {
                 saveToLocalStorage();
             } else {
                 saveToFile();
@@ -381,7 +906,7 @@
         
         loadBtn.addEventListener('click', () => {
             // 提供两种加载方式：本地存储和文件上传
-            if (confirm('请选择加载方式:\n\n确定 - 从本地存储加载\n取消 - 从文件加载')) {
+            if (confirm('请选择加载方式:\n\n确定 - 从本地存储加载 (从浏览器加载)\n取消 - 从文件加载 (从电脑选择文件)')) {
                 loadFromLocalStorage();
             } else {
                 fileInput.click();
@@ -394,33 +919,71 @@
             }
         });
         
+        // 说明按钮事件
+        infoBtn.addEventListener('click', openInfoModal);
+        closeModal.addEventListener('click', closeInfoModal);
+        
+        // 点击模态框外部关闭
+        infoModal.addEventListener('click', (e) => {
+            if (e.target === infoModal) {
+                closeInfoModal();
+            }
+        });
+        
+        // 标签页切换事件
+        tabButtons.forEach(button => {
+            button.addEventListener('click', () => {
+                switchTab(button.dataset.tab);
+            });
+        });
+        
         // 初始化
         const defaultContent = `# Markdown 编辑器
 
 ## 功能特点
 
 - **实时预览**: 左侧编辑，右侧即时预览
+- **同步滚动**: 编辑区和预览区同步滚动
+- **光标位置显示**: 实时显示当前行和列
 - **丰富的语法支持**: 支持表格、代码块、数学公式等
 - **保存/加载**: 支持本地存储和文件操作
 - **安全可靠**: 内置XSS防护
 
-## 代码示例
+## 同步滚动演示
+
+尝试滚动一侧的内容，另一侧会自动同步到相应位置。
+
+### 代码示例
 
 \`\`\`javascript
 function helloWorld() {
     console.log('Hello, Markdown Editor!');
+    // 这是一段示例代码
+    return {
+        message: "欢迎使用Markdown编辑器",
+        features: [
+            "实时预览",
+            "同步滚动",
+            "语法高亮"
+        ]
+    };
 }
 \`\`\`
 
+### 长内容测试
+
+${Array(20).fill().map((_, i) => `这是第${i+1}个段落，用于测试同步滚动功能。当内容很长时，同步滚动可以帮助用户更好地对应编辑区和预览区的内容。`).join('\n\n')}
+
 ## 表格示例
 
-| 功能 | 支持情况 |
-|------|----------|
-| 标题 | ✅ |
-| 列表 | ✅ |
-| 代码块 | ✅ |
-| 表格 | ✅ |
-| 数学公式 | ⚠️ |
+| 功能 | 支持情况 | 说明 |
+|------|----------|------|
+| 标题 | ✅ | 支持6级标题 |
+| 列表 | ✅ | 有序和无序列表 |
+| 代码块 | ✅ | 支持语法高亮 |
+| 表格 | ✅ | 支持对齐方式 |
+| 数学公式 | ⚠️ | 部分支持 |
+| 同步滚动 | ✅ | 双向同步 |
 
 ## 链接与图片
 
@@ -428,11 +991,63 @@ function helloWorld() {
 
 ---
 
-> 提示: 使用左侧编辑区编写Markdown，右侧查看实时预览效果
+> 提示: 开始编写您的Markdown内容吧！右侧会实时显示预览效果。尝试滚动一侧，观察另一侧的同步效果。
+
+## 本地存储功能
+
+您的Markdown内容可以保存到浏览器的本地存储中：
+
+1. **保存到本地存储**：内容将存储在您的浏览器中
+2. **下载为文件**：内容将保存为.md文件到您的电脑
+3. **从本地存储加载**：从浏览器存储中恢复您的内容
+4. **从文件加载**：从您的电脑选择Markdown文件
+
+## 本地存储的特点
+
+- **持久性**：即使关闭浏览器，内容也不会丢失
+- **域名特定**：每个网站有自己的存储空间
+- **容量限制**：通常每个域名有5MB左右的存储空间
+- **易于访问**：通过JavaScript可以轻松读写
+
+## 查看本地存储内容
+
+您可以通过浏览器开发者工具查看本地存储的内容：
+
+1. 按F12打开开发者工具
+2. 切换到"Application"（应用程序）标签
+3. 展开"Local Storage"并选择当前网站
+4. 您将看到保存的"markdownContent"键及其值
+
+## 代码示例
+
+\`\`\`javascript
+// 保存内容到本地存储
+localStorage.setItem('markdownContent', content);
+
+// 从本地存储读取内容
+const savedContent = localStorage.getItem('markdownContent');
+
+// 删除本地存储的内容
+localStorage.removeItem('markdownContent');
+\`\`\`
+
+
+## 使用提示
+
+1. 使用顶部按钮保存或加载内容
+2. 点击"说明"按钮查看详细使用指南
+3. 使用同步滚动功能方便对照编辑和预览
+
+---
+
+> 提示: 使用顶部按钮尝试保存和加载功能，体验本地存储的便利性！
 `;
 
-        editor.value = localStorage.getItem('markdownContent') || defaultContent;
+        // 尝试从本地存储加载内容，如果没有则使用默认内容
+        const savedContent = localStorage.getItem('markdownContent');
+        editor.value = savedContent || defaultContent;
         updatePreview();
+        updateCursorPosition();
     </script>
 </body>
 </html>
