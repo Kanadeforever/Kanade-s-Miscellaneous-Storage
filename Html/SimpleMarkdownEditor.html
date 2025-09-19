@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>增强版 Markdown 编辑器</title>
+    <!-- 引入Marked.js库 -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- 引入DOMPurify防止XSS攻击 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.5/purify.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f6f8fa;
+            color: #24292e;
+        }
+        
+        .header {
+            background-color: #2d333b;
+            color: white;
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+        
+        .header h1 {
+            font-size: 1.5rem;
+            font-weight: 500;
+        }
+        
+        .header-actions {
+            display: flex;
+            gap: 10px;
+        }
+        
+        .btn {
+            background-color: #3b83f6;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background-color 0.2s;
+        }
+        
+        .btn:hover {
+            background-color: #2563eb;
+        }
+        
+        .btn-secondary {
+            background-color: #6b7280;
+        }
+        
+        .btn-secondary:hover {
+            background-color: #4b5563;
+        }
+        
+        .editor-container {
+            display: flex;
+            height: calc(100vh - 60px);
+        }
+        
+        .editor-panel {
+            flex: 1;
+            padding: 0;
+            overflow: auto;
+            position: relative;
+        }
+        
+        .panel-header {
+            background-color: #f6f8fa;
+            padding: 10px 15px;
+            border-bottom: 1px solid #e1e4e8;
+            font-weight: 500;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        #editor {
+            width: 100%;
+            height: calc(100% - 41px);
+            border: none;
+            resize: none;
+            outline: none;
+            font-size: 16px;
+            line-height: 1.6;
+            padding: 15px;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            tab-size: 4;
+        }
+        
+        #preview {
+            padding: 15px;
+            height: calc(100% - 41px);
+            overflow: auto;
+            background-color: white;
+        }
+        
+        /* Markdown样式 */
+        #preview h1, #preview h2, #preview h3, #preview h4 {
+            margin-top: 24px;
+            margin-bottom: 16px;
+            font-weight: 600;
+            padding-bottom: 0.3em;
+            border-bottom: 1px solid #eaecef;
+        }
+        
+        #preview h1 { font-size: 2em; }
+        #preview h2 { font-size: 1.5em; }
+        #preview h3 { font-size: 1.25em; }
+        #preview h4 { font-size: 1em; }
+        
+        #preview p {
+            margin-bottom: 16px;
+            line-height: 1.5;
+        }
+        
+        #preview code {
+            background-color: rgba(175, 184, 193, 0.2);
+            padding: 0.2em 0.4em;
+            border-radius: 6px;
+            font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+            font-size: 85%;
+        }
+        
+        #preview pre {
+            background-color: #f6f8fa;
+            padding: 16px;
+            border-radius: 6px;
+            overflow: auto;
+            margin-bottom: 16px;
+            line-height: 1.45;
+        }
+        
+        #preview pre code {
+            background: none;
+            padding: 0;
+            border-radius: 0;
+        }
+        
+        #preview blockquote {
+            border-left: 4px solid #dfe2e5;
+            padding-left: 15px;
+            color: #6a737d;
+            margin-left: 0;
+            margin-bottom: 16px;
+        }
+        
+        #preview table {
+            border-collapse: collapse;
+            width: 100%;
+            margin-bottom: 16px;
+        }
+        
+        #preview th, #preview td {
+            border: 1px solid #dfe2e5;
+            padding: 6px 13px;
+        }
+        
+        #preview th {
+            background-color: #f6f8fa;
+            font-weight: 600;
+        }
+        
+        #preview tr:nth-child(even) {
+            background-color: #f6f8fa;
+        }
+        
+        #preview ul, #preview ol {
+            margin-bottom: 16px;
+            padding-left: 2em;
+        }
+        
+        #preview li {
+            margin-bottom: 0.25em;
+        }
+        
+        #preview img {
+            max-width: 100%;
+            box-sizing: content-box;
+            margin-bottom: 16px;
+        }
+        
+        #preview a {
+            color: #0366d6;
+            text-decoration: none;
+        }
+        
+        #preview a:hover {
+            text-decoration: underline;
+        }
+        
+        #preview hr {
+            height: 0.25em;
+            padding: 0;
+            margin: 24px 0;
+            background-color: #e1e4e8;
+            border: 0;
+        }
+        
+        .status-message {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 10px 15px;
+            background-color: #2d333b;
+            color: white;
+            border-radius: 6px;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        
+        .status-message.show {
+            opacity: 1;
+        }
+        
+        /* 响应式设计 */
+        @media (max-width: 768px) {
+            .editor-container {
+                flex-direction: column;
+            }
+            
+            .editor-panel {
+                height: 50%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Markdown编辑器</h1>
+        <div class="header-actions">
+            <button id="load-btn" class="btn btn-secondary">载入</button>
+            <button id="save-btn" class="btn">保存</button>
+        </div>
+    </div>
+
+    <div class="editor-container">
+        <div class="editor-panel">
+            <div class="panel-header">
+                <span>编辑区</span>
+                <span id="char-count">0 字符</span>
+            </div>
+            <textarea id="editor" placeholder="开始编写 Markdown..."></textarea>
+        </div>
+        <div class="editor-panel">
+            <div class="panel-header">预览区</div>
+            <div id="preview"></div>
+        </div>
+    </div>
+    
+    <input type="file" id="file-input" style="display: none;" accept=".md,.txt,.markdown">
+    
+    <div class="status-message" id="status-message"></div>
+
+    <script>
+        const editor = document.getElementById('editor');
+        const preview = document.getElementById('preview');
+        const saveBtn = document.getElementById('save-btn');
+        const loadBtn = document.getElementById('load-btn');
+        const fileInput = document.getElementById('file-input');
+        const charCount = document.getElementById('char-count');
+        const statusMessage = document.getElementById('status-message');
+        
+        // 配置marked
+        marked.setOptions({
+            breaks: true,
+            gfm: true,
+            highlight: function(code, lang) {
+                // 在实际应用中，这里可以集成highlight.js等语法高亮库
+                return code;
+            }
+        });
+        
+        // 渲染Markdown
+        function renderMarkdown(md) {
+            // 使用DOMPurify清理HTML，防止XSS攻击
+            return DOMPurify.sanitize(marked.parse(md));
+        }
+        
+        // 更新预览
+        function updatePreview() {
+            preview.innerHTML = renderMarkdown(editor.value);
+            charCount.textContent = editor.value.length + ' 字符';
+        }
+        
+        // 显示状态消息
+        function showStatusMessage(message, duration = 3000) {
+            statusMessage.textContent = message;
+            statusMessage.classList.add('show');
+            
+            setTimeout(() => {
+                statusMessage.classList.remove('show');
+            }, duration);
+        }
+        
+        // 保存内容到本地存储
+        function saveToLocalStorage() {
+            try {
+                localStorage.setItem('markdownContent', editor.value);
+                showStatusMessage('内容已保存到本地存储');
+            } catch (e) {
+                showStatusMessage('保存失败: ' + e.message);
+            }
+        }
+        
+        // 从本地存储加载内容
+        function loadFromLocalStorage() {
+            try {
+                const content = localStorage.getItem('markdownContent');
+                if (content) {
+                    editor.value = content;
+                    updatePreview();
+                    showStatusMessage('内容已从本地存储加载');
+                } else {
+                    showStatusMessage('没有找到保存的内容');
+                }
+            } catch (e) {
+                showStatusMessage('加载失败: ' + e.message);
+            }
+        }
+        
+        // 保存为文件
+        function saveToFile() {
+            const blob = new Blob([editor.value], { type: 'text/markdown' });
+            const url = URL.createObjectURL(blob);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `markdown-${new Date().toISOString().slice(0, 10)}.md`;
+            document.body.appendChild(a);
+            a.click();
+            
+            // 清理
+            setTimeout(() => {
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }, 100);
+            
+            showStatusMessage('文件已下载');
+        }
+        
+        // 从文件加载
+        function loadFromFile(file) {
+            const reader = new FileReader();
+            
+            reader.onload = function(e) {
+                editor.value = e.target.result;
+                updatePreview();
+                showStatusMessage('文件已加载: ' + file.name);
+            };
+            
+            reader.onerror = function() {
+                showStatusMessage('读取文件时出错');
+            };
+            
+            reader.readAsText(file);
+        }
+        
+        // 事件监听
+        editor.addEventListener('input', updatePreview);
+        
+        saveBtn.addEventListener('click', () => {
+            // 提供两种保存方式：本地存储和文件下载
+            if (confirm('请选择保存方式:\n\n确定 - 保存到本地存储\n取消 - 下载为文件')) {
+                saveToLocalStorage();
+            } else {
+                saveToFile();
+            }
+        });
+        
+        loadBtn.addEventListener('click', () => {
+            // 提供两种加载方式：本地存储和文件上传
+            if (confirm('请选择加载方式:\n\n确定 - 从本地存储加载\n取消 - 从文件加载')) {
+                loadFromLocalStorage();
+            } else {
+                fileInput.click();
+            }
+        });
+        
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length > 0) {
+                loadFromFile(fileInput.files[0]);
+            }
+        });
+        
+        // 初始化
+        const defaultContent = `# Markdown 编辑器
+
+## 功能特点
+
+- **实时预览**: 左侧编辑，右侧即时预览
+- **丰富的语法支持**: 支持表格、代码块、数学公式等
+- **保存/加载**: 支持本地存储和文件操作
+- **安全可靠**: 内置XSS防护
+
+## 代码示例
+
+\`\`\`javascript
+function helloWorld() {
+    console.log('Hello, Markdown Editor!');
+}
+\`\`\`
+
+## 表格示例
+
+| 功能 | 支持情况 |
+|------|----------|
+| 标题 | ✅ |
+| 列表 | ✅ |
+| 代码块 | ✅ |
+| 表格 | ✅ |
+| 数学公式 | ⚠️ |
+
+## 链接与图片
+
+访问 [Markdown指南](https://www.markdownguide.org/) 了解更多语法。
+
+---
+
+> 提示: 使用左侧编辑区编写Markdown，右侧查看实时预览效果
+`;
+
+        editor.value = localStorage.getItem('markdownContent') || defaultContent;
+        updatePreview();
+    </script>
+</body>
+</html>
