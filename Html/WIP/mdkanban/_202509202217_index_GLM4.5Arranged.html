@@ -1,0 +1,1356 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>[GLM4.5优化版] Markdown看板 - Trello风格</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        /* 基础样式优化 */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f5f7f9;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 10px 15px;
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: #026aa7;
+        }
+
+        .logo i {
+            margin-right: 10px;
+        }
+
+        .board-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        .btn {
+            padding: 8px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .btn-primary {
+            background-color: #026aa7;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background-color: #005a8b;
+        }
+
+        .btn-secondary {
+            background-color: #e2e8f0;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            background-color: #cbd5e0;
+        }
+
+        .btn-danger {
+            background-color: #e53e3e;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background-color: #c53030;
+        }
+
+        .btn-success {
+            background-color: #38a169;
+            color: white;
+        }
+
+        .btn-success:hover {
+            background-color: #2f855a;
+        }
+
+        .board {
+            display: flex;
+            gap: 20px;
+            overflow-x: auto;
+            padding-bottom: 20px;
+        }
+
+        .column {
+            flex: 0 0 300px;
+            background-color: #ebecf0;
+            border-radius: 8px;
+            padding: 10px;
+            min-height: 500px;
+        }
+
+        .column-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+            padding: 5px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .column-title {
+            font-weight: bold;
+            color: #333;
+        }
+
+        .column-actions {
+            display: flex;
+            gap: 5px;
+        }
+
+        .column-actions button {
+            background: none;
+            border: none;
+            color: #6b7280;
+            cursor: pointer;
+            font-size: 16px;
+            padding: 2px;
+            border-radius: 3px;
+        }
+
+        .column-actions button:hover {
+            background-color: rgba(0, 0, 0, 0.1);
+            color: #333;
+        }
+
+        .cards-container {
+            min-height: 400px;
+        }
+
+        .card {
+            background-color: white;
+            border-radius: 6px;
+            padding: 10px;
+            margin-bottom: 10px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            position: relative;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .card-title {
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: #333;
+        }
+
+        .card-description {
+            color: #6b7280;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+
+        .card-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12px;
+            color: #6b7280;
+        }
+
+        .card-tags {
+            display: flex;
+            gap: 5px;
+            flex-wrap: wrap;
+            margin-bottom: 8px;
+        }
+
+        .tag {
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 12px;
+            font-weight: bold;
+            color: white;
+        }
+
+        .tag-blue { background-color: #026aa7; }
+        .tag-green { background-color: #38a169; }
+        .tag-yellow { background-color: #d69e2e; }
+        .tag-red { background-color: #e53e3e; }
+        .tag-purple { background-color: #805ad5; }
+
+        .add-card {
+            display: flex;
+            align-items: center;
+            padding: 8px 10px;
+            background-color: rgba(255, 255, 255, 0.5);
+            border-radius: 4px;
+            cursor: pointer;
+            color: #6b7280;
+            transition: background-color 0.2s;
+        }
+
+        .add-card:hover {
+            background-color: rgba(255, 255, 255, 0.8);
+            color: #333;
+        }
+
+        .add-card i {
+            margin-right: 5px;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .modal.active {
+            display: flex;
+            opacity: 1;
+        }
+
+        .modal-content {
+            background-color: white;
+            border-radius: 8px;
+            width: 90%;
+            max-width: 600px;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+            transform: translateY(20px);
+            transition: transform 0.3s;
+        }
+
+        .modal.active .modal-content {
+            transform: translateY(0);
+        }
+
+        .modal-header {
+            padding: 15px 20px;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-title {
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 20px;
+            cursor: pointer;
+            color: #6b7280;
+        }
+
+        .modal-close:hover {
+            color: #333;
+        }
+
+        .modal-body {
+            padding: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .form-control {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #e2e8f0;
+            border-radius: 4px;
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+
+        .form-control:focus {
+            outline: none;
+            border-color: #026aa7;
+            box-shadow: 0 0 0 2px rgba(2, 106, 167, 0.2);
+        }
+
+        textarea.form-control {
+            resize: vertical;
+            min-height: 100px;
+        }
+
+        .modal-footer {
+            padding: 15px 20px;
+            border-top: 1px solid #e2e8f0;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background-color: #333;
+            color: white;
+            padding: 12px 20px;
+            border-radius: 4px;
+            box-shadow: 0 3px 10px rgba(0, 0, 0, 0.2);
+            z-index: 2000;
+            opacity: 0;
+            transform: translateY(20px);
+            transition: opacity 0.3s, transform 0.3s;
+            max-width: 300px;
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .toast.success {
+            background-color: #38a169;
+        }
+
+        .toast.error {
+            background-color: #e53e3e;
+        }
+
+        .toast.warning {
+            background-color: #d69e2e;
+        }
+
+        .toast.info {
+            background-color: #026aa7;
+        }
+
+        .subtasks {
+            margin-top: 10px;
+        }
+
+        .subtask {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+            padding: 5px;
+            background-color: #f7fafc;
+            border-radius: 4px;
+        }
+
+        .subtask input[type="checkbox"] {
+            margin-right: 8px;
+        }
+
+        .subtask-text {
+            flex: 1;
+            font-size: 14px;
+        }
+
+        .subtask.completed .subtask-text {
+            text-decoration: line-through;
+            color: #a0aec0;
+        }
+
+        .add-subtask {
+            display: flex;
+            margin-top: 10px;
+        }
+
+        .add-subtask input {
+            flex: 1;
+            margin-right: 5px;
+        }
+
+        .date-picker {
+            position: relative;
+        }
+
+        .date-picker input {
+            padding-right: 30px;
+        }
+
+        .date-picker i {
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: #6b7280;
+        }
+
+        .tag-selector {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 5px;
+        }
+
+        .tag-option {
+            padding: 5px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            color: white;
+            transition: transform 0.2s;
+        }
+
+        .tag-option:hover {
+            transform: scale(1.05);
+        }
+
+        .tag-option.selected {
+            box-shadow: 0 0 0 2px white, 0 0 0 4px currentColor;
+        }
+
+        .add-column {
+            flex: 0 0 300px;
+            background-color: rgba(255, 255, 255, 0.5);
+            border-radius: 8px;
+            padding: 10px;
+            min-height: 500px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            cursor: pointer;
+            color: #6b7280;
+            transition: background-color 0.2s;
+        }
+
+        .add-column:hover {
+            background-color: rgba(255, 255, 255, 0.8);
+            color: #333;
+        }
+
+        .add-column i {
+            font-size: 24px;
+            margin-bottom: 10px;
+        }
+
+        .dark-mode {
+            background-color: #1a202c;
+            color: #e2e8f0;
+        }
+
+        .dark-mode header,
+        .dark-mode .modal-content,
+        .dark-mode .card,
+        .dark-mode .add-card {
+            background-color: #2d3748;
+            color: #e2e8f0;
+        }
+
+        .dark-mode .column {
+            background-color: #2d3748;
+        }
+
+        .dark-mode .form-control {
+            background-color: #4a5568;
+            color: #e2e8f0;
+            border-color: #4a5568;
+        }
+
+        .dark-mode .form-control:focus {
+            border-color: #026aa7;
+            box-shadow: 0 0 0 2px rgba(2, 106, 167, 0.2);
+        }
+
+        .dark-mode .modal-header,
+        .dark-mode .modal-footer {
+            border-color: #4a5568;
+        }
+
+        .dark-mode .subtask {
+            background-color: #4a5568;
+        }
+
+        .dark-mode .add-column {
+            background-color: rgba(45, 55, 72, 0.5);
+        }
+
+        .dark-mode .add-column:hover {
+            background-color: rgba(45, 55, 72, 0.8);
+        }
+
+        .dark-mode .btn-secondary {
+            background-color: #4a5568;
+            color: #e2e8f0;
+        }
+
+        .dark-mode .btn-secondary:hover {
+            background-color: #718096;
+        }
+
+        .sortable-ghost {
+            opacity: 0.4;
+        }
+
+        .sortable-drag {
+            opacity: 0.8;
+        }
+
+        .card-handle {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            color: #cbd5e0;
+            cursor: grab;
+            font-size: 14px;
+        }
+
+        .card-handle:active {
+            cursor: grabbing;
+        }
+
+        @media (max-width: 768px) {
+            .column {
+                flex: 0 0 250px;
+            }
+            
+            .add-column {
+                flex: 0 0 250px;
+            }
+            
+            .board-actions {
+                flex-wrap: wrap;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">
+                <i class="fas fa-clipboard-list"></i>
+                <span>Markdown看板</span>
+            </div>
+            <div class="board-actions">
+                <button class="btn btn-secondary" id="exportBtn">
+                    <i class="fas fa-file-export"></i> 导出
+                </button>
+                <button class="btn btn-secondary" id="importBtn">
+                    <i class="fas fa-file-import"></i> 导入
+                </button>
+                <button class="btn btn-secondary" id="darkModeBtn">
+                    <i class="fas fa-moon"></i> 深色模式
+                </button>
+            </div>
+        </header>
+
+        <div class="board" id="board">
+            <!-- 列将通过JavaScript动态生成 -->
+        </div>
+    </div>
+
+    <!-- 添加/编辑卡片模态框 -->
+    <div class="modal" id="cardModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title" id="cardModalTitle">添加卡片</h3>
+                <button class="modal-close" id="closeCardModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="cardForm">
+                    <div class="form-group">
+                        <label class="form-label" for="cardTitle">标题</label>
+                        <input type="text" class="form-control" id="cardTitle" required>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="cardDescription">描述</label>
+                        <textarea class="form-control" id="cardDescription"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">标签</label>
+                        <div class="tag-selector" id="tagSelector">
+                            <div class="tag-option tag-blue" data-color="blue">蓝色</div>
+                            <div class="tag-option tag-green" data-color="green">绿色</div>
+                            <div class="tag-option tag-yellow" data-color="yellow">黄色</div>
+                            <div class="tag-option tag-red" data-color="red">红色</div>
+                            <div class="tag-option tag-purple" data-color="purple">紫色</div>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="cardDueDate">截止日期</label>
+                        <div class="date-picker">
+                            <input type="date" class="form-control" id="cardDueDate">
+                            <i class="fas fa-calendar-alt"></i>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">子任务</label>
+                        <div class="subtasks" id="subtasks">
+                            <!-- 子任务将通过JavaScript动态生成 -->
+                        </div>
+                        <div class="add-subtask">
+                            <input type="text" class="form-control" id="newSubtask" placeholder="添加子任务">
+                            <button type="button" class="btn btn-secondary" id="addSubtaskBtn">
+                                <i class="fas fa-plus"></i>
+                            </button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <div class="btn-group">
+                    <button type="button" class="btn btn-secondary" id="cancelCardBtn">取消</button>
+                    <button type="button" class="btn btn-primary" id="saveCardBtn">确定</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 标签选择模态框 -->
+    <div class="modal" id="tagModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">选择标签</h3>
+                <button class="modal-close" id="closeTagModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="tag-selector" id="tagModalSelector">
+                    <div class="tag-option tag-blue" data-color="blue">蓝色</div>
+                    <div class="tag-option tag-green" data-color="green">绿色</div>
+                    <div class="tag-option tag-yellow" data-color="yellow">黄色</div>
+                    <div class="tag-option tag-red" data-color="red">红色</div>
+                    <div class="tag-option tag-purple" data-color="purple">紫色</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div class="btn-group">
+                    <button type="button" class="btn btn-secondary" id="cancelTagBtn">取消</button>
+                    <button type="button" class="btn btn-primary" id="saveTagBtn">确定</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 添加列模态框 -->
+    <div class="modal" id="columnModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title">添加列</h3>
+                <button class="modal-close" id="closeColumnModal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="columnForm">
+                    <div class="form-group">
+                        <label class="form-label" for="columnTitle">列标题</label>
+                        <input type="text" class="form-control" id="columnTitle" required>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <div class="btn-group">
+                    <button type="button" class="btn btn-secondary" id="cancelColumnBtn">取消</button>
+                    <button type="button" class="btn btn-primary" id="saveColumnBtn">确定</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast 提示 -->
+    <div class="toast" id="toast"></div>
+
+    <!-- 隐藏的文件输入 -->
+    <input type="file" id="fileInput" style="display: none;" accept=".json">
+
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
+    <script>
+        // 初始化数据
+        let boardData = {
+            columns: [
+                {
+                    id: 'col1',
+                    title: '待办',
+                    cards: [
+                        {
+                            id: 'card1',
+                            title: '项目启动',
+                            description: '开始新项目的规划阶段',
+                            tags: ['blue'],
+                            dueDate: '2023-06-15',
+                            subtasks: [
+                                { id: 'sub1', text: '确定项目范围', completed: true },
+                                { id: 'sub2', text: '分配资源', completed: false },
+                                { id: 'sub3', text: '制定时间表', completed: false }
+                            ]
+                        },
+                        {
+                            id: 'card2',
+                            title: '需求分析',
+                            description: '收集并分析用户需求',
+                            tags: ['green'],
+                            dueDate: '2023-06-20',
+                            subtasks: [
+                                { id: 'sub4', text: '用户访谈', completed: false },
+                                { id: 'sub5', text: '需求文档编写', completed: false }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    id: 'col2',
+                    title: '进行中',
+                    cards: [
+                        {
+                            id: 'card3',
+                            title: 'UI设计',
+                            description: '设计用户界面',
+                            tags: ['yellow'],
+                            dueDate: '2023-06-25',
+                            subtasks: [
+                                { id: 'sub6', text: '线框图设计', completed: true },
+                                { id: 'sub7', text: '高保真原型', completed: false }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    id: 'col3',
+                    title: '已完成',
+                    cards: [
+                        {
+                            id: 'card4',
+                            title: '市场调研',
+                            description: '完成市场调研报告',
+                            tags: ['purple'],
+                            dueDate: '2023-06-10',
+                            subtasks: [
+                                { id: 'sub8', text: '数据收集', completed: true },
+                                { id: 'sub9', text: '报告撰写', completed: true }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        };
+
+        // 当前编辑的卡片和列信息
+        let currentCard = null;
+        let currentColumn = null;
+        let currentCardId = null;
+        let currentColumnId = null;
+
+        // DOM 元素
+        const board = document.getElementById('board');
+        const cardModal = document.getElementById('cardModal');
+        const tagModal = document.getElementById('tagModal');
+        const columnModal = document.getElementById('columnModal');
+        const cardForm = document.getElementById('cardForm');
+        const columnForm = document.getElementById('columnForm');
+        const cardTitle = document.getElementById('cardTitle');
+        const cardDescription = document.getElementById('cardDescription');
+        const cardDueDate = document.getElementById('cardDueDate');
+        const tagSelector = document.getElementById('tagSelector');
+        const tagModalSelector = document.getElementById('tagModalSelector');
+        const subtasksContainer = document.getElementById('subtasks');
+        const newSubtaskInput = document.getElementById('newSubtask');
+        const columnTitleInput = document.getElementById('columnTitle');
+        const toast = document.getElementById('toast');
+        const fileInput = document.getElementById('fileInput');
+        const darkModeBtn = document.getElementById('darkModeBtn');
+        const exportBtn = document.getElementById('exportBtn');
+        const importBtn = document.getElementById('importBtn');
+
+        // 初始化看板
+        function initBoard() {
+            board.innerHTML = '';
+            
+            boardData.columns.forEach(column => {
+                const columnElement = createColumnElement(column);
+                board.appendChild(columnElement);
+                
+                // 初始化卡片容器为可排序
+                const cardsContainer = columnElement.querySelector('.cards-container');
+                new Sortable(cardsContainer, {
+                    group: 'shared',
+                    animation: 150,
+                    ghostClass: 'sortable-ghost',
+                    dragClass: 'sortable-drag',
+                    onEnd: function(evt) {
+                        const cardId = evt.item.dataset.cardId;
+                        const newColumnId = evt.to.closest('.column').dataset.columnId;
+                        const oldColumnId = evt.from.closest('.column').dataset.columnId;
+                        
+                        // 如果在同一列内移动，调整顺序
+                        if (oldColumnId === newColumnId) {
+                            const column = boardData.columns.find(c => c.id === oldColumnId);
+                            const cardIndex = column.cards.findIndex(c => c.id === cardId);
+                            const [movedCard] = column.cards.splice(cardIndex, 1);
+                            column.cards.splice(evt.newIndex, 0, movedCard);
+                        } else {
+                            // 跨列移动
+                            moveCard(cardId, oldColumnId, newColumnId, evt.newIndex);
+                        }
+                        
+                        saveBoardData();
+                    }
+                });
+            });
+            
+            // 添加"添加列"按钮
+            const addColumnBtn = document.createElement('div');
+            addColumnBtn.className = 'add-column';
+            addColumnBtn.innerHTML = `
+                <i class="fas fa-plus"></i>
+                <span>添加列</span>
+            `;
+            addColumnBtn.addEventListener('click', () => {
+                openColumnModal();
+            });
+            board.appendChild(addColumnBtn);
+        }
+
+        // 创建列元素
+        function createColumnElement(column) {
+            const columnElement = document.createElement('div');
+            columnElement.className = 'column';
+            columnElement.dataset.columnId = column.id;
+            
+            columnElement.innerHTML = `
+                <div class="column-header">
+                    <div class="column-title">${column.title}</div>
+                    <div class="column-actions">
+                        <button class="delete-column-btn" title="删除列">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="cards-container">
+                    ${column.cards.map(card => createCardElement(card)).join('')}
+                </div>
+                <div class="add-card">
+                    <i class="fas fa-plus"></i>
+                    <span>添加卡片</span>
+                </div>
+            `;
+            
+            // 添加卡片按钮事件
+            const addCardBtn = columnElement.querySelector('.add-card');
+            addCardBtn.addEventListener('click', () => {
+                openCardModal(column.id);
+            });
+            
+            // 删除列按钮事件
+            const deleteColumnBtn = columnElement.querySelector('.delete-column-btn');
+            deleteColumnBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (confirm(`确定要删除列"${column.title}"吗？此操作不可撤销。`)) {
+                    deleteColumn(column.id);
+                }
+            });
+            
+            return columnElement;
+        }
+
+        // 创建卡片元素
+        function createCardElement(card) {
+            const tagsHtml = card.tags.map(tag => 
+                `<span class="tag tag-${tag}"></span>`
+            ).join('');
+            
+            const subtasksHtml = card.subtasks ? card.subtasks.map(subtask => 
+                `<div class="subtask ${subtask.completed ? 'completed' : ''}">
+                    <input type="checkbox" ${subtask.completed ? 'checked' : ''} data-subtask-id="${subtask.id}">
+                    <span class="subtask-text">${subtask.text}</span>
+                </div>`
+            ).join('') : '';
+            
+            const dueDateHtml = card.dueDate ? 
+                `<span><i class="fas fa-calendar-alt"></i> ${formatDate(card.dueDate)}</span>` : 
+                '';
+            
+            return `
+                <div class="card" data-card-id="${card.id}">
+                    <div class="card-handle"><i class="fas fa-grip-vertical"></i></div>
+                    <div class="card-title">${card.title}</div>
+                    <div class="card-description">${card.description}</div>
+                    <div class="card-tags">${tagsHtml}</div>
+                    ${subtasksHtml ? `<div class="subtasks">${subtasksHtml}</div>` : ''}
+                    <div class="card-meta">
+                        ${dueDateHtml}
+                        <span><i class="fas fa-ellipsis-h"></i></span>
+                    </div>
+                </div>
+            `;
+        }
+
+        // 格式化日期
+        function formatDate(dateString) {
+            const options = { year: 'numeric', month: 'short', day: 'numeric' };
+            return new Date(dateString).toLocaleDateString(undefined, options);
+        }
+
+        // 打开卡片模态框
+        function openCardModal(columnId, cardId = null) {
+            currentColumnId = columnId;
+            currentCardId = cardId;
+            
+            if (cardId) {
+                // 编辑现有卡片
+                const column = boardData.columns.find(c => c.id === columnId);
+                currentCard = column.cards.find(c => c.id === cardId);
+                
+                document.getElementById('cardModalTitle').textContent = '编辑卡片';
+                cardTitle.value = currentCard.title;
+                cardDescription.value = currentCard.description;
+                cardDueDate.value = currentCard.dueDate || '';
+                
+                // 设置标签
+                document.querySelectorAll('.tag-option').forEach(tag => {
+                    tag.classList.toggle('selected', currentCard.tags.includes(tag.dataset.color));
+                });
+                
+                // 设置子任务
+                renderSubtasks(currentCard.subtasks || []);
+            } else {
+                // 添加新卡片
+                document.getElementById('cardModalTitle').textContent = '添加卡片';
+                cardForm.reset();
+                document.querySelectorAll('.tag-option').forEach(tag => {
+                    tag.classList.remove('selected');
+                });
+                renderSubtasks([]);
+            }
+            
+            cardModal.classList.add('active');
+        }
+
+        // 关闭卡片模态框
+        function closeCardModal() {
+            cardModal.classList.remove('active');
+            cardForm.reset();
+            currentCard = null;
+            currentColumnId = null;
+            currentCardId = null;
+        }
+
+        // 保存卡片
+        function saveCard() {
+            if (!cardTitle.value.trim()) {
+                showToast('请输入卡片标题', 'error');
+                return;
+            }
+            
+            const selectedTags = Array.from(document.querySelectorAll('.tag-option.selected'))
+                .map(tag => tag.dataset.color);
+            
+            const subtasks = Array.from(subtasksContainer.querySelectorAll('.subtask')).map(subtaskEl => {
+                const checkbox = subtaskEl.querySelector('input[type="checkbox"]');
+                const text = subtaskEl.querySelector('.subtask-text').textContent;
+                return {
+                    id: checkbox.dataset.subtaskId || generateId(),
+                    text: text,
+                    completed: checkbox.checked
+                };
+            });
+            
+            const cardData = {
+                title: cardTitle.value.trim(),
+                description: cardDescription.value.trim(),
+                tags: selectedTags,
+                dueDate: cardDueDate.value,
+                subtasks: subtasks
+            };
+            
+            if (currentCardId) {
+                // 更新现有卡片
+                const column = boardData.columns.find(c => c.id === currentColumnId);
+                const cardIndex = column.cards.findIndex(c => c.id === currentCardId);
+                column.cards[cardIndex] = { ...column.cards[cardIndex], ...cardData };
+                showToast('卡片已更新', 'success');
+            } else {
+                // 添加新卡片
+                const newCard = {
+                    id: generateId(),
+                    ...cardData
+                };
+                
+                const column = boardData.columns.find(c => c.id === currentColumnId);
+                column.cards.push(newCard);
+                showToast('卡片已添加', 'success');
+            }
+            
+            saveBoardData();
+            initBoard();
+            closeCardModal();
+        }
+
+        // 渲染子任务
+        function renderSubtasks(subtasks) {
+            subtasksContainer.innerHTML = '';
+            
+            subtasks.forEach(subtask => {
+                const subtaskEl = document.createElement('div');
+                subtaskEl.className = `subtask ${subtask.completed ? 'completed' : ''}`;
+                subtaskEl.innerHTML = `
+                    <input type="checkbox" ${subtask.completed ? 'checked' : ''} data-subtask-id="${subtask.id}">
+                    <span class="subtask-text">${subtask.text}</span>
+                    <button type="button" class="btn btn-danger btn-sm delete-subtask">
+                        <i class="fas fa-times"></i>
+                    </button>
+                `;
+                
+                const checkbox = subtaskEl.querySelector('input[type="checkbox"]');
+                checkbox.addEventListener('change', () => {
+                    subtaskEl.classList.toggle('completed', checkbox.checked);
+                });
+                
+                const deleteBtn = subtaskEl.querySelector('.delete-subtask');
+                deleteBtn.addEventListener('click', () => {
+                    subtaskEl.remove();
+                });
+                
+                subtasksContainer.appendChild(subtaskEl);
+            });
+        }
+
+        // 添加子任务
+        function addSubtask() {
+            const text = newSubtaskInput.value.trim();
+            if (!text) return;
+            
+            const subtaskEl = document.createElement('div');
+            subtaskEl.className = 'subtask';
+            subtaskEl.innerHTML = `
+                <input type="checkbox" data-subtask-id="${generateId()}">
+                <span class="subtask-text">${text}</span>
+                <button type="button" class="btn btn-danger btn-sm delete-subtask">
+                    <i class="fas fa-times"></i>
+                </button>
+            `;
+            
+            const checkbox = subtaskEl.querySelector('input[type="checkbox"]');
+            checkbox.addEventListener('change', () => {
+                subtaskEl.classList.toggle('completed', checkbox.checked);
+            });
+            
+            const deleteBtn = subtaskEl.querySelector('.delete-subtask');
+            deleteBtn.addEventListener('click', () => {
+                subtaskEl.remove();
+            });
+            
+            subtasksContainer.appendChild(subtaskEl);
+            newSubtaskInput.value = '';
+        }
+
+        // 打开标签选择模态框
+        function openTagModal(cardId, columnId) {
+            currentCardId = cardId;
+            currentColumnId = columnId;
+            
+            const column = boardData.columns.find(c => c.id === columnId);
+            const card = column.cards.find(c => c.id === cardId);
+            
+            // 重置标签选择
+            document.querySelectorAll('#tagModalSelector .tag-option').forEach(tag => {
+                tag.classList.toggle('selected', card.tags.includes(tag.dataset.color));
+            });
+            
+            tagModal.classList.add('active');
+        }
+
+        // 关闭标签选择模态框
+        function closeTagModal() {
+            tagModal.classList.remove('active');
+            currentCardId = null;
+            currentColumnId = null;
+        }
+
+        // 保存标签选择
+        function saveTagSelection() {
+            if (!currentCardId || !currentColumnId) return;
+            
+            const selectedTags = Array.from(document.querySelectorAll('#tagModalSelector .tag-option.selected'))
+                .map(tag => tag.dataset.color);
+            
+            const column = boardData.columns.find(c => c.id === currentColumnId);
+            const card = column.cards.find(c => c.id === currentCardId);
+            card.tags = selectedTags;
+            
+            saveBoardData();
+            initBoard();
+            closeTagModal();
+            showToast('标签已更新', 'success');
+        }
+
+        // 打开列模态框
+        function openColumnModal() {
+            columnModal.classList.add('active');
+            columnTitleInput.focus();
+        }
+
+        // 关闭列模态框
+        function closeColumnModal() {
+            columnModal.classList.remove('active');
+            columnForm.reset();
+        }
+
+        // 保存列
+        function saveColumn() {
+            const title = columnTitleInput.value.trim();
+            if (!title) {
+                showToast('请输入列标题', 'error');
+                return;
+            }
+            
+            const newColumn = {
+                id: generateId(),
+                title: title,
+                cards: []
+            };
+            
+            boardData.columns.push(newColumn);
+            saveBoardData();
+            initBoard();
+            closeColumnModal();
+            showToast('列已添加', 'success');
+        }
+
+        // 删除列
+        function deleteColumn(columnId) {
+            boardData.columns = boardData.columns.filter(c => c.id !== columnId);
+            saveBoardData();
+            initBoard();
+            showToast('列已删除', 'success');
+        }
+
+        // 移动卡片
+        function moveCard(cardId, fromColumnId, toColumnId, newIndex) {
+            const fromColumn = boardData.columns.find(c => c.id === fromColumnId);
+            const toColumn = boardData.columns.find(c => c.id === toColumnId);
+            
+            const cardIndex = fromColumn.cards.findIndex(c => c.id === cardId);
+            const [movedCard] = fromColumn.cards.splice(cardIndex, 1);
+            
+            toColumn.cards.splice(newIndex, 0, movedCard);
+        }
+
+        // 生成唯一ID
+        function generateId() {
+            return Date.now().toString(36) + Math.random().toString(36).substr(2);
+        }
+
+        // 保存看板数据到本地存储
+        function saveBoardData() {
+            localStorage.setItem('kanbanBoardData', JSON.stringify(boardData));
+        }
+
+        // 从本地存储加载看板数据
+        function loadBoardData() {
+            const savedData = localStorage.getItem('kanbanBoardData');
+            if (savedData) {
+                try {
+                    boardData = JSON.parse(savedData);
+                } catch (e) {
+                    console.error('Failed to parse saved board data', e);
+                    showToast('加载保存的数据失败', 'error');
+                }
+            }
+        }
+
+        // 导出看板数据
+        function exportBoardData() {
+            const dataStr = JSON.stringify(boardData, null, 2);
+            const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+            
+            const exportFileDefaultName = `kanban-board-${new Date().toISOString().slice(0, 10)}.json`;
+            
+            const linkElement = document.createElement('a');
+            linkElement.setAttribute('href', dataUri);
+            linkElement.setAttribute('download', exportFileDefaultName);
+            linkElement.click();
+            
+            showToast('看板数据已导出', 'success');
+        }
+
+        // 导入看板数据
+        function importBoardData() {
+            fileInput.click();
+        }
+
+        // 处理文件导入
+        function handleFileImport(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const importedData = JSON.parse(e.target.result);
+                    
+                    // 验证导入的数据结构
+                    if (!importedData.columns || !Array.isArray(importedData.columns)) {
+                        throw new Error('无效的数据格式');
+                    }
+                    
+                    boardData = importedData;
+                    saveBoardData();
+                    initBoard();
+                    showToast('看板数据已导入', 'success');
+                } catch (error) {
+                    console.error('Import error:', error);
+                    showToast('导入失败: ' + error.message, 'error');
+                }
+            };
+            
+            reader.readAsText(file);
+            fileInput.value = ''; // 重置文件输入
+        }
+
+        // 切换深色模式
+        function toggleDarkMode() {
+            document.body.classList.toggle('dark-mode');
+            const isDarkMode = document.body.classList.contains('dark-mode');
+            
+            // 更新按钮图标
+            darkModeBtn.innerHTML = isDarkMode ? 
+                '<i class="fas fa-sun"></i> 浅色模式' : 
+                '<i class="fas fa-moon"></i> 深色模式';
+            
+            // 保存深色模式设置
+            localStorage.setItem('darkMode', isDarkMode);
+        }
+
+        // 显示提示消息
+        function showToast(message, type = 'info') {
+            toast.textContent = message;
+            toast.className = 'toast show';
+            
+            // 根据类型添加不同的样式
+            if (type === 'success') {
+                toast.classList.add('success');
+            } else if (type === 'error') {
+                toast.classList.add('error');
+            } else if (type === 'warning') {
+                toast.classList.add('warning');
+            } else {
+                toast.classList.add('info');
+            }
+            
+            // 3秒后自动隐藏
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+
+        // 事件监听器
+        document.getElementById('closeCardModal').addEventListener('click', closeCardModal);
+        document.getElementById('saveCardBtn').addEventListener('click', saveCard);
+        document.getElementById('cancelCardBtn').addEventListener('click', closeCardModal);
+        document.getElementById('addSubtaskBtn').addEventListener('click', addSubtask);
+        document.getElementById('newSubtask').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                addSubtask();
+            }
+        });
+
+        document.getElementById('closeTagModal').addEventListener('click', closeTagModal);
+        document.getElementById('saveTagBtn').addEventListener('click', saveTagSelection);
+        document.getElementById('cancelTagBtn').addEventListener('click', closeTagModal);
+
+        document.getElementById('closeColumnModal').addEventListener('click', closeColumnModal);
+        document.getElementById('saveColumnBtn').addEventListener('click', saveColumn);
+        document.getElementById('cancelColumnBtn').addEventListener('click', closeColumnModal);
+
+        darkModeBtn.addEventListener('click', toggleDarkMode);
+        exportBtn.addEventListener('click', exportBoardData);
+        importBtn.addEventListener('click', importBoardData);
+        fileInput.addEventListener('change', handleFileImport);
+
+        // 标签选择事件
+        document.querySelectorAll('.tag-option').forEach(tag => {
+            tag.addEventListener('click', () => {
+                tag.classList.toggle('selected');
+            });
+        });
+
+        // 点击模态框外部关闭模态框
+        window.addEventListener('click', (e) => {
+            if (e.target === cardModal) {
+                closeCardModal();
+            } else if (e.target === tagModal) {
+                closeTagModal();
+            } else if (e.target === columnModal) {
+                closeColumnModal();
+            }
+        });
+
+        // 初始化应用
+        function initApp() {
+            // 加载保存的数据
+            loadBoardData();
+            
+            // 应用深色模式设置
+            const isDarkMode = localStorage.getItem('darkMode') === 'true';
+            if (isDarkMode) {
+                document.body.classList.add('dark-mode');
+                darkModeBtn.innerHTML = '<i class="fas fa-sun"></i> 浅色模式';
+            }
+            
+            // 初始化看板
+            initBoard();
+        }
+
+        // 启动应用
+        initApp();
+    </script>
+</body>
+</html>

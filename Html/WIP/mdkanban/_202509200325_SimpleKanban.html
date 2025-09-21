@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Markdown看板</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f5f7f9;
+            padding: 20px;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            color: #2c3e50;
+        }
+
+        .instructions {
+            background-color: #e8f4fc;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            font-size: 0.9rem;
+        }
+
+        .kanban-container {
+            display: flex;
+            gap: 20px;
+            overflow-x: auto;
+            padding-bottom: 20px;
+        }
+
+        .column {
+            flex: 0 0 300px;
+            background-color: #e6e9ed;
+            border-radius: 8px;
+            padding: 15px;
+            min-height: 500px;
+        }
+
+        .column-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #ccc;
+        }
+
+        .column-title {
+            font-weight: bold;
+            font-size: 1.2rem;
+            color: #2c3e50;
+        }
+
+        .add-card-btn, .delete-column {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+
+        .delete-column {
+            background: #e74c3c;
+        }
+
+        .card {
+            background: white;
+            padding: 12px;
+            margin-bottom: 12px;
+            border-radius: 6px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            cursor: move;
+        }
+
+        .card-content {
+            min-height: 60px;
+            margin-bottom: 10px;
+        }
+
+        .card-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+
+        .card-actions button {
+            border: none;
+            background: none;
+            cursor: pointer;
+            font-size: 0.9rem;
+            color: #7f8c8d;
+        }
+
+        .card-actions button:hover {
+            color: #2c3e50;
+        }
+
+        .add-column {
+            flex: 0 0 200px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #add-column-btn {
+            background: #2ecc71;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1rem;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .modal-content {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            width: 90%;
+            max-width: 500px;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .close {
+            font-size: 1.5rem;
+            cursor: pointer;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 150px;
+            padding: 10px;
+            margin-bottom: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            resize: vertical;
+        }
+
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        .modal-actions button {
+            padding: 8px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        #save-card {
+            background: #2ecc71;
+            color: white;
+        }
+
+        #cancel-edit {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .dragging {
+            opacity: 0.6;
+        }
+
+        .dropzone {
+            background-color: rgba(46, 204, 113, 0.2);
+            min-height: 100px;
+            border: 2px dashed #2ecc71;
+            border-radius: 6px;
+            margin-bottom: 12px;
+        }
+
+        .import-export {
+            margin-top: 30px;
+            text-align: center;
+        }
+
+        .import-export button {
+            background: #9b59b6;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 0 10px;
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 40px;
+            color: #7f8c8d;
+            font-size: 0.9rem;
+        }
+
+        @media (max-width: 768px) {
+            .kanban-container {
+                flex-direction: column;
+            }
+            
+            .column {
+                width: 100%;
+                flex: 1;
+            }
+            
+            .add-column {
+                width: 100%;
+                flex: 1;
+                margin-top: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Markdown看板</h1>
+        <p>简单的本地看板应用 - 您的数据仅保存在浏览器中</p>
+    </header>
+
+    <div class="instructions">
+        <p><strong>使用说明：</strong> 添加列和卡片来组织您的任务。卡片内容支持Markdown格式。所有数据自动保存在浏览器本地。</p>
+    </div>
+
+    <div class="kanban-container" id="kanban-container">
+        <!-- 列将通过JavaScript动态添加 -->
+    </div>
+
+    <div class="import-export">
+        <button id="export-btn">导出数据</button>
+        <button id="import-btn">导入数据</button>
+        <input type="file" id="import-file" style="display: none;" accept=".json">
+    </div>
+
+    <div class="modal" id="card-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modal-title">编辑卡片</h2>
+                <span class="close">&times;</span>
+            </div>
+            <textarea id="card-text" placeholder="输入内容，支持Markdown语法..."></textarea>
+            <div class="modal-actions">
+                <button id="cancel-edit">取消</button>
+                <button id="save-card">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <p>基于Markdown的看板应用 | 数据保存在本地浏览器中</p>
+    </footer>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // 初始示例数据
+            const initialData = [
+                {
+                    title: '待处理',
+                    cards: [
+                        { content: '- [ ] 任务1\n- 这是待处理的任务' },
+                        { content: '- [ ] 任务2\n- 另一个待办事项' }
+                    ]
+                },
+                {
+                    title: '进行中',
+                    cards: [
+                        { content: '- [x] 任务3\n- 正在进行的任务' }
+                    ]
+                },
+                {
+                    title: '已完成',
+                    cards: [
+                        { content: '- [x] 任务4\n- 已完成的任务' }
+                    ]
+                }
+            ];
+
+            // 获取或初始化数据
+            let kanbanData = JSON.parse(localStorage.getItem('kanbanData')) || initialData;
+            
+            // 保存数据到本地存储
+            function saveData() {
+                localStorage.setItem('kanbanData', JSON.stringify(kanbanData));
+            }
+
+            // 渲染看板
+            function renderKanban() {
+                const container = document.getElementById('kanban-container');
+                container.innerHTML = '';
+
+                kanbanData.forEach((column, columnIndex) => {
+                    const columnElement = document.createElement('div');
+                    columnElement.className = 'column';
+                    columnElement.dataset.columnIndex = columnIndex;
+
+                    const columnHeader = document.createElement('div');
+                    columnHeader.className = 'column-header';
+
+                    const title = document.createElement('div');
+                    title.className = 'column-title';
+                    title.textContent = column.title;
+                    title.contentEditable = true;
+                    title.addEventListener('blur', () => {
+                        column.title = title.textContent;
+                        saveData();
+                    });
+
+                    const deleteBtn = document.createElement('button');
+                    deleteBtn.className = 'delete-column';
+                    deleteBtn.textContent = '删除';
+                    deleteBtn.addEventListener('click', () => {
+                        if (confirm('确定要删除这一列吗？')) {
+                            kanbanData.splice(columnIndex, 1);
+                            saveData();
+                            renderKanban();
+                        }
+                    });
+
+                    columnHeader.appendChild(title);
+                    columnHeader.appendChild(deleteBtn);
+                    columnElement.appendChild(columnHeader);
+
+                    column.cards.forEach((card, cardIndex) => {
+                        const cardElement = document.createElement('div');
+                        cardElement.className = 'card';
+                        cardElement.draggable = true;
+                        cardElement.dataset.cardIndex = cardIndex;
+
+                        const cardContent = document.createElement('div');
+                        cardContent.className = 'card-content';
+                        // 简单Markdown转HTML
+                        cardContent.innerHTML = convertMarkdownToHtml(card.content);
+
+                        const cardActions = document.createElement('div');
+                        cardActions.className = 'card-actions';
+
+                        const editBtn = document.createElement('button');
+                        editBtn.textContent = '编辑';
+                        editBtn.addEventListener('click', () => {
+                            openEditModal(columnIndex, cardIndex);
+                        });
+
+                        const deleteCardBtn = document.createElement('button');
+                        deleteCardBtn.textContent = '删除';
+                        deleteCardBtn.addEventListener('click', () => {
+                            if (confirm('确定要删除这张卡片吗？')) {
+                                column.cards.splice(cardIndex, 1);
+                                saveData();
+                                renderKanban();
+                            }
+                        });
+
+                        cardActions.appendChild(editBtn);
+                        cardActions.appendChild(deleteCardBtn);
+
+                        cardElement.appendChild(cardContent);
+                        cardElement.appendChild(cardActions);
+
+                        // 拖放功能
+                        cardElement.addEventListener('dragstart', (e) => {
+                            e.dataTransfer.setData('text/plain', `${columnIndex}-${cardIndex}`);
+                            setTimeout(() => cardElement.classList.add('dragging'), 0);
+                        });
+
+                        cardElement.addEventListener('dragend', () => {
+                            cardElement.classList.remove('dragging');
+                        });
+
+                        columnElement.appendChild(cardElement);
+                    });
+
+                    const addCardBtn = document.createElement('button');
+                    addCardBtn.className = 'add-card-btn';
+                    addCardBtn.textContent = '+ 添加卡片';
+                    addCardBtn.addEventListener('click', () => {
+                        openEditModal(columnIndex, -1);
+                    });
+
+                    columnElement.appendChild(addCardBtn);
+
+                    // 放置区域
+                    columnElement.addEventListener('dragover', (e) => {
+                        e.preventDefault();
+                        columnElement.classList.add('dropzone');
+                    });
+
+                    columnElement.addEventListener('dragleave', () => {
+                        columnElement.classList.remove('dropzone');
+                    });
+
+                    columnElement.addEventListener('drop', (e) => {
+                        e.preventDefault();
+                        columnElement.classList.remove('dropzone');
+                        
+                        const data = e.dataTransfer.getData('text/plain').split('-');
+                        const fromColumn = parseInt(data[0]);
+                        const fromCard = parseInt(data[1]);
+                        
+                        if (fromColumn !== columnIndex) {
+                            // 移动卡片到当前列
+                            const card = kanbanData[fromColumn].cards[fromCard];
+                            kanbanData[fromColumn].cards.splice(fromCard, 1);
+                            column.cards.push(card);
+                            saveData();
+                            renderKanban();
+                        }
+                    });
+
+                    container.appendChild(columnElement);
+                });
+
+                // 添加列按钮
+                const addColumn = document.createElement('div');
+                addColumn.className = 'add-column';
+
+                const addColumnBtn = document.createElement('button');
+                addColumnBtn.id = 'add-column-btn';
+                addColumnBtn.textContent = '+ 添加列';
+                addColumnBtn.addEventListener('click', () => {
+                    const title = prompt('请输入列标题:');
+                    if (title) {
+                        kanbanData.push({
+                            title: title,
+                            cards: []
+                        });
+                        saveData();
+                        renderKanban();
+                    }
+                });
+
+                addColumn.appendChild(addColumnBtn);
+                container.appendChild(addColumn);
+            }
+
+            // 简单的Markdown转HTML函数
+            function convertMarkdownToHtml(text) {
+                return text
+                    .replace(/^- \[ \] (.*)/gm, '<input type="checkbox" disabled> $1<br>')
+                    .replace(/^- \[x\] (.*)/gm, '<input type="checkbox" checked disabled> $1<br>')
+                    .replace(/^# (.*)/gm, '<h1>$1</h1>')
+                    .replace(/^## (.*)/gm, '<h2>$1</h2>')
+                    .replace(/^### (.*)/gm, '<h3>$1</h3>')
+                    .replace(/\*\*(.*)\*\*/g, '<strong>$1</strong>')
+                    .replace(/\*(.*)\*/g, '<em>$1</em>')
+                    .replace(/`(.*)`/g, '<code>$1</code>')
+                    .replace(/\n/g, '<br>');
+            }
+
+            // 模态框功能
+            const modal = document.getElementById('card-modal');
+            const cardText = document.getElementById('card-text');
+            const modalTitle = document.getElementById('modal-title');
+            const closeBtn = document.querySelector('.close');
+            const cancelBtn = document.getElementById('cancel-edit');
+            const saveBtn = document.getElementById('save-card');
+
+            let currentColumnIndex = -1;
+            let currentCardIndex = -1;
+
+            function openEditModal(columnIndex, cardIndex) {
+                currentColumnIndex = columnIndex;
+                currentCardIndex = cardIndex;
+                
+                if (cardIndex === -1) {
+                    modalTitle.textContent = '添加新卡片';
+                    cardText.value = '';
+                } else {
+                    modalTitle.textContent = '编辑卡片';
+                    cardText.value = kanbanData[columnIndex].cards[cardIndex].content;
+                }
+                
+                modal.style.display = 'flex';
+            }
+
+            function closeModal() {
+                modal.style.display = 'none';
+            }
+
+            function saveCard() {
+                const content = cardText.value.trim();
+                if (content) {
+                    if (currentCardIndex === -1) {
+                        // 添加新卡片
+                        kanbanData[currentColumnIndex].cards.push({ content });
+                    } else {
+                        // 更新现有卡片
+                        kanbanData[currentColumnIndex].cards[currentCardIndex].content = content;
+                    }
+                    saveData();
+                    renderKanban();
+                    closeModal();
+                }
+            }
+
+            closeBtn.addEventListener('click', closeModal);
+            cancelBtn.addEventListener('click', closeModal);
+            saveBtn.addEventListener('click', saveCard);
+
+            // 点击模态框外部关闭
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) closeModal();
+            });
+
+            // 导出功能
+            document.getElementById('export-btn').addEventListener('click', () => {
+                const dataStr = JSON.stringify(kanbanData, null, 2);
+                const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+                
+                const exportFileDefaultName = 'markdown-kanban.json';
+                
+                const linkElement = document.createElement('a');
+                linkElement.setAttribute('href', dataUri);
+                linkElement.setAttribute('download', exportFileDefaultName);
+                linkElement.click();
+            });
+
+            // 导入功能
+            document.getElementById('import-btn').addEventListener('click', () => {
+                document.getElementById('import-file').click();
+            });
+
+            document.getElementById('import-file').addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const importedData = JSON.parse(e.target.result);
+                        if (Array.isArray(importedData)) {
+                            if (confirm('导入数据将覆盖当前看板，确定要继续吗？')) {
+                                kanbanData = importedData;
+                                saveData();
+                                renderKanban();
+                                alert('数据导入成功！');
+                            }
+                        } else {
+                            alert('导入的文件格式不正确');
+                        }
+                    } catch (error) {
+                        alert('导入失败：文件格式错误');
+                    }
+                };
+                reader.readAsText(file);
+                
+                // 重置文件输入，允许再次选择同一文件
+                e.target.value = '';
+            });
+
+            // 初始化渲染
+            renderKanban();
+        });
+    </script>
+</body>
+</html>
