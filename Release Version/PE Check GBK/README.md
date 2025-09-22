@@ -61,7 +61,3 @@ PE_Check_GBK.bat "C:\test\program.dll"
 ## 许可证
 
 本项目采用CC0 1.0通用公共领域贡献许可证。这意味着作者放弃所有版权，将作品置于公共领域。您可以自由复制、修改、分发和商业使用，无需署名。有关详细信息，请参阅[CC0许可证全文](https://creativecommons.org/publicdomain/zero/1.0/)。
-
-## 贡献
-
-欢迎提交Issue或Pull Request来改进工具！
