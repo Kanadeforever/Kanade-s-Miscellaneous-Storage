@@ -8,6 +8,12 @@
 
 ---
 
+## rename_torrent_src.py
+- 用来把任何torrent文件重命名为种子内文件名称的脚本。
+- 如果要打包成二进制文件，需要用虚拟环境打包：`python -m venv _venv && call _venv\Scripts\activate`
+- 打包指令：`python -m PyInstaller -F --hidden-import=bencodepy rename_torrent_src.py`
+- 上方不行的话使用这个指令在虚拟环境重新安装pyinstaller：`python -m pip install --force-reinstall pyinstaller`
+
 ## LittleAppBrowserLite.py
 
 - 使用 `pywebview` 调用系统浏览器内核的、支持多平台的简易浏览器GUI
