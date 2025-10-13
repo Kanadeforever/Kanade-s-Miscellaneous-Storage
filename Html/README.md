@@ -6,13 +6,13 @@
 
 以下各个项目的简单说明。
 
-## SimpleMarkdownEditor.html
+## [SimpleMarkdownEditor.html](SimpleMarkdownEditor.html)
 - 测试VSCode+Continue+DeepSeek编程的产物；
 - 非常基础，markdown的编写、预览、载入、保存都正常运作；
 - 单文件，一个Html文件用浏览器打开就能用。
 - 一句话需求的我，DeepSeek编写的代码。
 
-## SimpleKanban.html
+## [SimpleKanban.html](SimpleKanban.html)
 - 被上面测试后对DeepSeek的编程能力进步感到震惊后的产物；
 - 基础的支持Markdown的简单看板工具；
 - 因为到处都没有符合我需求（markdown明文本地储存的看板软件），所以尝试DS手搓，没想到一发成型……
