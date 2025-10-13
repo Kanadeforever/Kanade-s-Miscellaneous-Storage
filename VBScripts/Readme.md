@@ -6,13 +6,13 @@
 
 以下各个项目的简单说明。
 
-## SteamLaunchOtherApp.vbs
+## [SteamLaunchOtherApp.vbs](SteamLaunchOtherApp.vbs)
 
 - 用于Steam在启动游戏时启动额外的程序；
 - 因为cmd会有命令行窗口所以单独创建了一个vbs版本；
 - 由我个人参考Copilot的教程完成，经过验证，易用性值得信赖。
 
-## XTU_Starup.vbs
+## [XTU_Starup.vbs](XTU_Starup.vbs)
 
 - 为该死的13900K缩缸准备的；
 - 为启动没有开机自启并且用“启动”文件夹也无法开机自启时准备的；
