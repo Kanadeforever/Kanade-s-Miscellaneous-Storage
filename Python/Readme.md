@@ -88,3 +88,9 @@
 - 使用方法已经完全暴露在GUI里，另外只支持选择文件夹，选择单个文件这个懒得改了，有兴趣可以把代码丢给copilot自己提需求改；
 - 支持进度条显示、支持剩余时间估算、高DPI缩放；
 - 基本上我提需求与DEBUG，Microsoft Copilot完成代码。
+
+## [PegasusListCreatorV2.py](PegasusListCreatorV2.py)
+- 简单的天马前端的信息生成/转换器；
+- 用于把天马前端的 `metadata.pegasus.txt` 转换成 `xlsx` 表格，便于批量处理；
+- 可以txt和xlsx互相转换，但因为能力所限，不支持添加文件前的各种参数，这个部分请自行解决；
+- 基本上我提需求与DEBUG，DeepSeek完成代码。
