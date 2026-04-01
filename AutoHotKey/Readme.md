@@ -74,3 +74,11 @@
 - 建议搭配 WindowMoveV2(WindowMoveV2.ahk) 脚本使用，效果更好；
 - 可能会存在窗口尺寸有个别像素的差异，这个暂时没有好方案解决；
 - 感谢Microsoft Copilot部分辅助。
+
+## [Base64Tool.ahk](Base64Tool.ahk)
+- 用于编解码Base64的小工具
+- Windows 原生 API 支持：直接调用底层的 Crypt32.dll 库进行转换，不需要依赖任何外部命令行工具，执行速度极快。
+- 兼容中文与符号：在底层严格按照 UTF-8 格式转换字节流再进行编码，完美支持任意中文字符（不会出现乱码）。
+- 去除换行符 (No CRLF)：Windows 默认的 Base64 编码规则是每隔 72 个字符换行一次，我在代码中叠加了 0x40000000 标记，强制输出为一行连贯的字符串。
+- 容错设计：在解码时，脚本会自动通过正则表达式 RegExReplace 剔除无关的空格或换行，防止从网页上复制的脏乱 Base64 数据导致解码失败。
+- Powered by Gemini 3.1 Pro
