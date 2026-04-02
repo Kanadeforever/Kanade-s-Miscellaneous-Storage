@@ -59,6 +59,10 @@
 - 脱胎自启动器模板(LauncherTemplate.ahk)，改写为了AHKv2版。
 - AHKv1版参见启动器模板(LauncherTemplate.ahk)。
 
+## [LauncherV2Another.ahk](LauncherV2Another.ahk)
+- [LauncherV2.ahk](LauncherV2.ahk) 丢进Gemini重构后的结果
+- 能用，相对美观
+
 ## [SimpleJoystickMapping.ahk](SimpleJoystickMapping.ahk)
 - 简单的手柄映射脚本，本是用于《天地劫·神魔至尊传》的便捷控制，但水平不够，输入手感感觉不够到位，未能继续优化。
 - it just works.
