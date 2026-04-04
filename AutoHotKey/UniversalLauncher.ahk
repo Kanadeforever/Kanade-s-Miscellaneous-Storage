@@ -4,7 +4,7 @@
 SetWorkingDir(A_ScriptDir)
 
 ; ==========================================
-; 配置文件路径
+; 全局配置与初始化
 ; ==========================================
 ; 下面是固定文件名称
 ; global IniFile := A_ScriptDir "\UniversalLauncher.ini"
@@ -17,7 +17,7 @@ global IniFile := A_ScriptDir "\" OutNameNoExt ".ini"
 global IL := 0 ; 全局图标库句柄
 
 ; ==========================================
-; 主界面 (Main GUI) - 现代化美化
+; 构建主界面 (Main GUI)
 ; ==========================================
 global MainGui := Gui("-MaximizeBox +DPIScale", "Universal Launcher")
 MainGui.BackColor := "FFFFFF" ; 纯白背景色更显现代感
@@ -57,7 +57,7 @@ LoadList() ; 初始化加载列表
 MainGui.Show("w540 h400")
 
 ; ==========================================
-; 核心逻辑：动态加载列表与图标
+; 列表加载与执行引擎
 ; ==========================================
 LoadList(*) {
     LV.Delete()
@@ -137,7 +137,7 @@ RunApp(*) {
 }
 
 ; ==========================================
-; 增、删、改 触发接口
+; 增删改管理逻辑
 ; ==========================================
 global EditSectionID := ""
 
@@ -164,7 +164,7 @@ DelApp(*) {
     }
     
     name := LV.GetText(row, 1)
-    if (MsgBox("确定要将【" name "】从列表中永久删除吗？", "确认删除", 52) == "Yes") {
+    if (MsgBox("确定删除【" name "】吗？", "确认删除", 52) == "Yes") {
         sec := LV.GetText(row, 3)
         IniDelete(IniFile, sec)  
         LoadList()               
