@@ -1,4 +1,4 @@
-#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0+
 #SingleInstance Force
 #NoTrayIcon
 SetWorkingDir(A_ScriptDir)
@@ -24,10 +24,10 @@ MainGui.BackColor := "FFFFFF" ; 纯白背景色更显现代感
 
 ; 现代化头部标题
 MainGui.SetFont("s16 Bold", "Microsoft YaHei UI")
-MainGui.Add("Text", "x20 y15 w500 c202020", "🚀 我的启动库")
+MainGui.Add("Text", "x20 y15 w500 c202020", "🚀 通用启动器")
 
 MainGui.SetFont("s9 Norm", "Microsoft YaHei UI")
-MainGui.Add("Text", "x20 y45 w500 c888888", "双击列表项即可极速启动对应的应用程序或游戏")
+MainGui.Add("Text", "x20 y45 w500 c888888", "双击列表项即可启动对应的程序或游戏（请先配置需要的程序）")
 
 ; 列表控件美化：去除网格(-Grid)，去除3D下沉边框(-E0x200)，开启整行选中
 MainGui.SetFont("s10 c202020")
