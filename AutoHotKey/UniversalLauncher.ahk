@@ -1,4 +1,4 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
 #SingleInstance Force
 #NoTrayIcon
 SetWorkingDir(A_ScriptDir)
@@ -15,8 +15,6 @@ SplitPath(A_ScriptName, , , , &OutNameNoExt)
 global IniFile := A_ScriptDir "\" OutNameNoExt ".ini"
 
 global IL := 0 ; 全局图标库句柄
-
-
 
 ; ==========================================
 ; 主界面 (Main GUI) - 现代化美化
@@ -58,7 +56,6 @@ btnDel.OnEvent("Click", DelApp)
 LoadList() ; 初始化加载列表
 MainGui.Show("w540 h400")
 
-
 ; ==========================================
 ; 核心逻辑：动态加载列表与图标
 ; ==========================================
@@ -92,7 +89,6 @@ LoadList(*) {
         }
     }
 }
-
 
 ; ==========================================
 ; 核心逻辑：运行程序
@@ -140,7 +136,6 @@ RunApp(*) {
     }
 }
 
-
 ; ==========================================
 ; 增、删、改 触发接口
 ; ==========================================
@@ -175,7 +170,6 @@ DelApp(*) {
         LoadList()               
     }
 }
-
 
 ; ==========================================
 ; 高级参数配置界面 (Config GUI) - 同步美化
@@ -216,22 +210,21 @@ ShowConfigGui() {
     ConfGui.Add("Text", "x100 y170 w260 c888888", "(例如填写 -windowed 或 -run，无需求请留空)")
 
     ConfGui.Add("Text", "x25 y200 w70", "起始位置:")
-    edWorkDir := ConfGui.Add("Edit", "x100 y197 w200", vWorkDir)
-    ConfGui.Add("Button", "x310 y196 w50 h24", "浏览").OnEvent("Click", (*) => (
-        sel := DirSelect(A_WorkingDir, 3, "选择起始位置 (工作目录)"),
-        (sel != "") ? edWorkDir.Value := sel : ""
-    ))
+    edWorkDir := ConfGui.Add("Edit", "x100 y197 w260", vWorkDir)
+    ; 新增的说明行：
+    ConfGui.Add("Text", "x100 y225 w260 c888888", "(留空则默认使用程序所在目录，可手动粘贴路径)")
 
-    ConfGui.Add("Text", "x25 y240 w70", "运行状态:")
+    ; 下方的控件坐标全部向下平移了 30 像素（y240 -> y270，以此类推）
+    ConfGui.Add("Text", "x25 y270 w70", "运行状态:")
     idx := (vWinState="Max") ? 2 : (vWinState="Min") ? 3 : (vWinState="Hide") ? 4 : 1
-    ddlWinState := ConfGui.Add("DropDownList", "x100 y237 w100 Choose" idx, ["Normal", "Max", "Min", "Hide"])
+    ddlWinState := ConfGui.Add("DropDownList", "x100 y267 w100 Choose" idx, ["Normal", "Max", "Min", "Hide"])
 
-    chkAdmin := ConfGui.Add("Checkbox", "x220 y240 w140 Checked" vRunAdmin, "以管理员身份运行")
+    chkAdmin := ConfGui.Add("Checkbox", "x220 y270 w140 Checked" vRunAdmin, "以管理员身份运行")
 
-    ConfGui.Add("Button", "x160 y295 w90 h32", "💾 保存").OnEvent("Click", SaveConfig)
-    ConfGui.Add("Button", "x270 y295 w90 h32", "❌ 取消").OnEvent("Click", (*) => (MainGui.Opt("-Disabled"), ConfGui.Destroy()))
+    ConfGui.Add("Button", "x160 y325 w90 h32", "💾 保存").OnEvent("Click", SaveConfig)
+    ConfGui.Add("Button", "x270 y325 w90 h32", "❌ 取消").OnEvent("Click", (*) => (MainGui.Opt("-Disabled"), ConfGui.Destroy()))
 
-    ConfGui.Show("w390 h350")
+    ConfGui.Show("w390 h380")
 
     SaveConfig(*) {
         if (edName.Value == "" || edPath.Value == "") {
