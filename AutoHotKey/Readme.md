@@ -1,6 +1,23 @@
 ## [compile](compile)
 - 存放编译好的EXE文件。
 
+## [XidiSimpleLoader.ahk](XidiSimpleLoader.ahk)
+- ~~傻逼Github，傻逼EDGE，害我一堆东西白写，去你娘的！~~
+- Powered by Microsoft Copilot；
+- 主要用于简化 [Xidi 5.0.0](https://github.com/samuelgr/Xidi) 后推荐使用的hookshot安装方式，让下载完文件放到对应位置后可以一键启动，避免复杂的使用方式劝退初次使用的人，这个工具值得拥有；
+- 附带按住Shift键再双击启动exe的强制初始化模式，方便经常切换exe；
+- 使用方式：
+  1. 下载 [XidiSimpleLoader.ahk](XidiSimpleLoader.ahk) 文件，和 [AutoHotkey 2.0](https://www.autohotkey.com) ，然后把 `XidiSimpleLoader.ahk` 编译成exe（是否使用mpress/upx压缩随意；编译成32/64位版本也随意）；
+      - 说明：编译好的exe可以保存起来，以后需要直接拿出exe就行了，不需要再编译，这个步骤只需要一次；
+  2. 先下载 [Xidi](https://github.com/samuelgr/Xidi/releases/latest) 和 [Hookshot](https://github.com/samuelgr/Hookshot/releases/latest) 最新的发行文件；
+      - 说明：Xidi需要大于等于5.0.0版，Hookshot需要大于等于2.0.0版，截至2026年4月，二者都满足要求；
+  3. 然后根据你的目标游戏的位数版本，Xidi选择 `Xidi.*.dll` 和 `Xidi.HookModule.*.dll` ，Hookshot选择 `Hookshot.*.dll` 和 `Hookshot.*.exe` ；
+      - 说明： `*` 符号代表 `32` 或者 `64` ，根据你的游戏版本选择，32位版本的文件在 `Win32` 文件夹里，64位版本在 `x64`文件夹里；SDK文件夹、ThirdParty文件夹、以及其他文件都不需要，可放心删除，只需要上面说的3个dll文件和1个exe文件；
+  4. 把 `Xidi.*.dll` 、 `Xidi.HookModule.*.dll` 、 `Hookshot.*.dll` 、 `Hookshot.*.exe` 和你刚编译好的exe一起放进你要用的游戏目录里；
+  5. 好了，运行刚编译的exe，然后选择你游戏的exe文件，就可以享受Xidi了！
+      - 以后只需要把刚编译的那个exe作为游戏的启动文件就行了，如果不需要则直接运行游戏的exe；
+      - 说人话就是以后双击刚编译的exe来启动游戏，别用游戏自己的exe。
+
 ## [ProxyWIN+VtoDitto.ahk](ProxyWIN+VtoDitto.ahk)
 - 主要用于屏蔽WIN10中后期开始添加的 `WIN+V` 键显示剪贴板、显示[Ditto](https://github.com/sabrogden/Ditto)界面、让Ditto显示在前台；
 - 调用更成熟的Ditto来接管 `WIN+V` 的功能，win这个太残废了；
@@ -90,5 +107,3 @@
 - Windows 原生 API 支持：直接调用底层的 Crypt32.dll 库进行转换，不需要依赖任何外部命令行工具，执行速度极快。
 - 兼容中文与符号：在底层严格按照 UTF-8 格式转换字节流再进行编码，完美支持任意中文字符（不会出现乱码）。
 - 去除换行符 (No CRLF)：Windows 默认的 Base64 编码规则是每隔 72 个字符换行一次，我在代码中叠加了 0x40000000 标记，强制输出为一行连贯的字符串。
-- 容错设计：在解码时，脚本会自动通过正则表达式 RegExReplace 剔除无关的空格或换行，防止从网页上复制的脏乱 Base64 数据导致解码失败。
-- Powered by Gemini 3.1 Pro
