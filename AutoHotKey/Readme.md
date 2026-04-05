@@ -84,7 +84,8 @@
 - [LauncherV2Another.ahk](LauncherV2Another.ahk) 丢进Gemini继续迭代后的结果
 - 能用，非常美观；
 - 不光可以启动，还能看到程序图标；
-- 最终版，再也不改了。
+- ~~最终版，再也不改了。~~
+- 最后还是加了比如拖拽添加、显示图标等等等等功能，就这样吧，这回真不改了
 
 ## [SimpleJoystickMapping.ahk](SimpleJoystickMapping.ahk)
 - 简单的手柄映射脚本，本是用于《天地劫·神魔至尊传》的便捷控制，但水平不够，输入手感感觉不够到位，未能继续优化。
