@@ -104,8 +104,9 @@ GuiDropFilesHandler(GuiObj, GuiCtrlObj, FileArray, X, Y) {
                 targetPath := filePath
         }
 
-        ; 自动写入 INI 配置文件
-        sec := "App_" A_TickCount "_" A_Index
+        ; 自动写入 INI 配置文件,更长的随机数或包含日期的字符串
+        ; sec := "App_" A_TickCount "_" A_Index
+        sec := "App_" A_Now "_" A_TickCount "_" A_Index
         IniWrite(name, IniFile, sec, "Name")
         IniWrite(targetPath, IniFile, sec, "Path")
         IniWrite(args, IniFile, sec, "Args")
