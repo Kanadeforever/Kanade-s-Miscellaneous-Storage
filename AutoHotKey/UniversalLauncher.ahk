@@ -37,7 +37,7 @@ MainGui.Add("Text", "x20 y15 w300 c202020", "通用启动器")
 
 ; 右上角运行状态指示
 MainGui.SetFont("s9 Bold")
-global txtStatus := MainGui.Add("Text", "x390 y20 w140 Right c888888", "状态: 就绪")
+global txtStatus := MainGui.Add("Text", "x390 y20 w140 Right c888888", "待机")
 
 MainGui.SetFont("s9 Norm", "Microsoft YaHei UI")
 MainGui.Add("Text", "x20 y45 w500 c888888", "双击运行，或将 *.exe / *.lnk 文件直接拖入此窗口添加")
@@ -239,59 +239,93 @@ RunApp(*) {
         return
     }
 
-    sec := LV.GetText(row, 3)
-    name := IniRead(IniFile, sec, "Name", "未知程序")
-    path := IniRead(IniFile, sec, "Path", "")
-    args := IniRead(IniFile, sec, "Args", "")
-    workDir := IniRead(IniFile, sec, "WorkDir", "")
-    winState := IniRead(IniFile, sec, "WinState", "Normal")
+    ; --- 1. 读取配置 ---
+    sec      := LV.GetText(row, 3)
+    name     := IniRead(IniFile, sec, "Name", "Unknown Program")
+    path     := IniRead(IniFile, sec, "Path", "")
+    args     := IniRead(IniFile, sec, "Args", "")
+    workDir  := IniRead(IniFile, sec, "WorkDir", "")
     runAdmin := IniRead(IniFile, sec, "RunAdmin", "0")
     waitExit := IniRead(IniFile, sec, "WaitExit", "1")
+    winState := IniRead(IniFile, sec, "WinState", "Normal")
 
-    if (path == "") {
-        MsgBox("未配置有效的目标路径！", "错误", 16)
+    ; --- 2. 核心路径解析 ---
+    ; 解析程序绝对路径
+    absPath := ResolvePath(path)
+    
+    ; 解析工作目录：留空或 . 则指向 A_ScriptDir；支持 ..
+    if (workDir == "" || workDir == ".") {
+        absWorkDir := A_ScriptDir
+    } else {
+        absWorkDir := ResolvePath(workDir)
+    }
+
+    ; --- 3. 校验 ---
+    if !FileExist(absPath) {
+        MsgBox("找不到程序文件：`n" absPath, "启动失败", 16)
+        return
+    }
+    if !DirExist(absWorkDir) {
+        MsgBox("找不到起始目录：`n" absWorkDir, "路径错误", 16)
         return
     }
 
-    targetCmd := path
-    if InStr(path, " ")
-        targetCmd := '"' path '"'
+    ; --- 4. 构造 AHK 运行指令 ---
+    ; 规则：如果路径包含空格，必须用双引号括起来
+    ; 我们统一给 absPath 加双引号以确保安全
+    targetWithArgs := '"' absPath '"'
+    
+    ; 即使 INI 删除了空格，这里强制补一个空格再加参数
     if (args != "")
-        targetCmd .= " " args
+        targetWithArgs .= " " Trim(args)
 
-    if (workDir == "")
-        SplitPath(path, , &workDir)
-
+    ; 处理管理员权限前缀
+    execStr := (runAdmin == "1") ? "*RunAs " targetWithArgs : targetWithArgs
+    
+    ; 处理运行状态 (Normal/Max/Min/Hide)
     runOpt := (winState != "Normal") ? winState : ""
 
+    ; --- 5. 执行 ---
     try {
+        txtStatus.Text := "正在运行:" name ""
+        txtStatus.Opt("c008000")
+        
         if (waitExit == "1") {
-            ; 挂钩模式
-            txtStatus.Text := "状态: 运行中 (" name ")"
-            txtStatus.Opt("c008000") ; 变绿指示运行中
             MainGui.Hide()
-
-            if (runAdmin == "1")
-                RunWait("*RunAs " targetCmd, workDir, runOpt)
-            else
-                RunWait(targetCmd, workDir, runOpt)
-
+            ; RunWait 的第二个参数即为 WorkingDir
+            RunWait(execStr, absWorkDir, runOpt)
             MainGui.Restore()
-            txtStatus.Text := "状态: 就绪"
-            txtStatus.Opt("c888888") ; 恢复灰色
+            
+            txtStatus.Text := "待机"
+            txtStatus.Opt("c888888")
         } else {
-            ; 非挂钩模式
-            if (runAdmin == "1")
-                Run("*RunAs " targetCmd, workDir, runOpt)
-            else
-                Run(targetCmd, workDir, runOpt)
+            Run(execStr, absWorkDir, runOpt)
         }
     } catch as err {
-        MsgBox("启动失败！`n目标命令：" targetCmd "`n起始位置：" workDir "`n`n系统反馈：" err.Message, "错误", 16)
+        MsgBox("启动失败！`n指令：" execStr "`n起始位置：" absWorkDir "`n`n反馈：" err.Message, "错误", 16)
         MainGui.Restore()
-        txtStatus.Text := "状态: 就绪"
+        txtStatus.Text := "待机"
         txtStatus.Opt("c888888")
     }
+}
+
+; 助手函数：将路径解析为标准的绝对路径 (处理 .. 和 .)
+ResolvePath(P) {
+    if (P == "") {
+        return
+    }
+    ; 如果是绝对路径
+    if (SubStr(P, 2, 1) == ":" || SubStr(P, 1, 2) == "\\")
+        return P
+    
+    ; 利用 Loop Files 获取 Windows 规范化的绝对路径 (可自动解析 ..)
+    resolved := ""
+    Loop Files, A_ScriptDir "\" P, "DF" {
+        resolved := A_LoopFileFullPath
+        break
+    }
+    ; 如果文件尚未存在(无法解析)，则手动拼接
+    return (resolved != "") ? resolved : A_ScriptDir "\" LTrim(P, "\")
 }
 
 ; ==========================================
