@@ -2,12 +2,17 @@
 #SingleInstance Force
 
 ; =========================
-; Paths (ALL RELATIVE)
+; 路径（全部为相对路径）
 ; =========================
 AppDir   := A_ScriptDir
 IniPath  := AppDir "\HookSettings.ini"
 IniSec   := "Main"
 IniKey   := "TargetExe"
+
+; =========================
+; 组件检查
+; =========================
+CheckRequiredComponents(AppDir)
 
 ; =========================
 ; Entry (with Shift override)
@@ -50,8 +55,61 @@ ExitApp
 
 
 ; =========================
-; Functions
+; 函数
 ; =========================
+
+; 检测函数，校验4个核心文件是否成套存在
+CheckRequiredComponents(dir) {
+    has32 := { hsExe: false, hsDll: false, xidiDll: false, xidiMod: false }
+    has64 := { hsExe: false, hsDll: false, xidiDll: false, xidiMod: false }
+
+    Loop Files dir "\*.*", "F" {
+        fn := A_LoopFileName
+        is32 := InStr(fn, "32")
+        is64 := InStr(fn, "64")
+
+        ; 注意：必须先匹配 Xidi.HookModule.*.dll，再去匹配 Xidi.*.dll，以免 HookModule 被误认为基础 Xidi
+        if RegExMatch(fn, "i)^Hookshot.*\.exe$") {
+            if is32
+                has32.hsExe := true
+            if is64
+                has64.hsExe := true
+        } else if RegExMatch(fn, "i)^Hookshot.*\.dll$") {
+            if is32
+                has32.hsDll := true
+            if is64
+                has64.hsDll := true
+        } else if RegExMatch(fn, "i)^Xidi\.HookModule.*\.dll$") {
+            if is32
+                has32.xidiMod := true
+            if is64
+                has64.xidiMod := true
+        } else if RegExMatch(fn, "i)^Xidi.*\.dll$") {
+            if is32
+                has32.xidiDll := true
+            if is64
+                has64.xidiDll := true
+        }
+    }
+
+    valid32 := has32.hsExe && has32.hsDll && has32.xidiDll && has32.xidiMod
+    valid64 := has64.hsExe && has64.hsDll && has64.xidiDll && has64.xidiMod
+
+    if !(valid32 || valid64) {
+        MsgBox(
+            "缺少必要的运行组件！`n`n"
+            "需要 32位 或 64位 的完整一套文件（共4个）：`n"
+            "- Hookshot.*.exe`n"
+            "- Hookshot.*.dll`n"
+            "- Xidi.*.dll`n"
+            "- Xidi.HookModule.*.dll`n`n"
+            "请检查文件是否完整后重试。", 
+            "组件缺失", 
+            "Iconx"
+        )
+        ExitApp
+    }
+}
 
 LoadTargetExe() {
     global IniPath, IniSec, IniKey
