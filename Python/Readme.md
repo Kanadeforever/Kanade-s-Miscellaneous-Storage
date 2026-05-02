@@ -8,6 +8,20 @@
 
 ---
 
+## [Comicinfo_XML_dlsite_CN_Genre.py](Comicinfo_XML_dlsite_CN_Genre.py)&[Comicinfo_XML_dlsite_JP_Genre.py](Comicinfo_XML_dlsite_JP_Genre.py)
+- 用于批量为漫画写入元数据的脚本
+- Powered Deepseek V3&V4（V4太猛了！）
+- 元数据基础内容由文件名获取，也就是标准的漫画文件名，比如：(一般コミック) [よしだもろへ] スターオーシャン2 セカンドエヴォリューション.zip
+- 自动把非英文名称的漫画名转换成英文字母并填入sortby标签中。
+- 由于这玩意一般拿去给同人本标记，所以支持度为同人本>限制级漫画>>>一般向漫画
+- 仅作基础上支持从dlsite处获取分类标签（作者水平不行）
+- 用法：
+  - 漫画无论是文件夹还是常见压缩包格式都丢尽input文件夹，没有就先运行脚本
+  - 先生成csv
+  - 修改csv的内容，如果需要标签也可以点击里面生成的dlsite的搜索链接，自行获取漫画的书籍页面（也就是有BJ/RJ号的页面）填到bookurl这列对应的位置
+  - csv处理完毕后选择“处理漫画”即可在网络能连上dlsite的情况下自行获取页面里的标签并填进元数据文件里，并在最后把元数据写入文件+转换成cbz格式（cbz就是zip，改了文件名方便漫画软件识别）
+    - cbz格式对于漫画软件尤其是欧美做的可以说支持度极高，这个脚本本来就是为了给komga上的漫画补充元数据的，理论上常见的不限平台的看漫画的软件应该直接支持并且支持元数据显示。
+
 ## [rename_torrent_src.py](rename_torrent_src.py)
 - 用来把任何torrent文件重命名为种子内文件名称的脚本。
 - 如果要打包成二进制文件，需要用虚拟环境打包：`python -m venv _venv && call _venv\Scripts\activate`
