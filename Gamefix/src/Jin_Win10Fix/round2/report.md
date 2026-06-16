@@ -1,0 +1,44 @@
+# Round 2：注册表弹窗绕过
+
+## 当前进度：80%
+
+## 已完成
+
+1. **定位序列号弹窗逻辑** — 完成
+   - 弹窗由 `DialogBoxParamA` @ RVA 0x16951 创建
+   - 弹窗前有条件跳转 `jne` @ RVA 0x168C8：序列号验证通过→跳过弹窗，失败→显示弹窗
+   - 弹窗标题字符串 "请输入产品的序列号" @ RVA 0xC3CF8
+
+2. **代码补丁** — 完成
+   - 将 RVA 0x168C8 的 `jne 0x169C0` (0F 85 F2 00 00 00) 改为 `jmp 0x169C0` (E9 F3 00 00 00 90)
+   - 效果：无论注册表是否有序列号，永远跳过弹窗，直接走成功路径
+   - 补丁文件：`workspace/round2/system_patched.dll`
+
+## 代码路径
+
+```
+RegOpenKeyExA → RegQueryValueExA("serial")
+  → 验证序列号 (call 0x1005e7c0)
+    → test eax, eax
+      → jne 0x169C0  ← 补丁：改为无条件 jmp，永不弹窗
+      → [失败路径] DialogBoxParamA (弹窗)
+```
+
+## 与 Round 1 组合使用
+
+| 文件 | 解决 |
+|------|------|
+| round1 `NitroSystem_patched.exe` | 导入 imm32.dll + fix.dll |
+| round1 `fix.dll` | Hook 4个 IME/输入 API |
+| round2 `system_patched.dll` | 绕过序列号弹窗 |
+
+## 部署
+
+复制到游戏目录：`system_patched.dll` → 改名为 `system.dll`（建议先备份原版）
+无需导入注册表。
+
+## 待验证
+
+- 补丁后游戏稳定运行
+- 存读档无异常
+- 无其他隐藏的序列号检查点
