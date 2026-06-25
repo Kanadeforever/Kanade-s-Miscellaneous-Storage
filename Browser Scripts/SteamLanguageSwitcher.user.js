@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Language Switcher
 // @namespace    https://github.com/Kanadeforever
-// @version      1.1.0
+// @version      1.1.1
 // @description  在 Steam 页面快速切换语言：简中 / 繁中 / 日本語 / English
 // @author       Luminous
 // @match        https://store.steampowered.com/*
