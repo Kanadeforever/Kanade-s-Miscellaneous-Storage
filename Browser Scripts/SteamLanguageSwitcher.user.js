@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         Steam Language Switcher
 // @namespace    https://github.com/Kanadeforever
-// @version      1.1.5
+// @version      1.1.6
 // @description  在 Steam 页面右上角添加语言切换条（简中/繁中/日本語/EN），可拖拽，自动记忆位置（widget 除外），窄窗口自动压缩
 // @author       Luminous
 // @match        https://store.steampowered.com/*
 // @match        https://steamcommunity.com/*
 // @match        https://help.steampowered.com/*
 // @match        https://steampowered.com/*
-// @grant        none
+// @grant        GM_registerMenuCommand
 // @downloadURL  https://github.com/Kanadeforever/Kanade-s-Miscellaneous-Storage/raw/main/Browser%20Scripts/SteamLanguageSwitcher.user.js
 // @updateURL    https://github.com/Kanadeforever/Kanade-s-Miscellaneous-Storage/raw/main/Browser%20Scripts/SteamLanguageSwitcher.user.js
 // @run-at       document-end
@@ -34,6 +34,11 @@
         url.searchParams.set('l', code);
         location.href = url.toString();
     }
+
+    GM_registerMenuCommand('重置保存的位置', () => {
+        localStorage.removeItem('steam-lang-bar-pos');
+        location.reload();
+    });
 
     function buildUI() {
         const cur = getCurrentLang();
