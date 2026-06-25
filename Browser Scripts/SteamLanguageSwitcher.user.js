@@ -9,8 +9,8 @@
 // @match        https://help.steampowered.com/*
 // @match        https://steampowered.com/*
 // @grant        none
-// @downloadURL https://github.com/Kanadeforever/Kanade-s-Miscellaneous-Storage/raw/main/Browser%20Scripts/SteamLanguageSwitcher.js
-// @updateURL https://github.com/Kanadeforever/Kanade-s-Miscellaneous-Storage/raw/main/Browser%20Scripts/SteamLanguageSwitcher.js
+// @downloadURL https://github.com/Kanadeforever/Kanade-s-Miscellaneous-Storage/raw/main/Browser%20Scripts/SteamLanguageSwitcher.user.js
+// @updateURL https://github.com/Kanadeforever/Kanade-s-Miscellaneous-Storage/raw/main/Browser%20Scripts/SteamLanguageSwitcher.user.js
 // @run-at       document-end
 // ==/UserScript==
 
