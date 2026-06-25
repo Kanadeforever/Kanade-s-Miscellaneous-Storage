@@ -1,16 +1,17 @@
 // ==UserScript==
 // @name         Steam Language Switcher
 // @namespace    https://github.com/Kanadeforever
-// @version      1.0.1
+// @version      1.1.0
 // @description  在 Steam 页面快速切换语言：简中 / 繁中 / 日本語 / English
 // @author       Luminous
 // @match        https://store.steampowered.com/*
 // @match        https://steamcommunity.com/*
 // @match        https://help.steampowered.com/*
 // @match        https://steampowered.com/*
-// @grant        none
-// @downloadURL https://github.com/Kanadeforever/Kanade-s-Miscellaneous-Storage/raw/main/Browser%20Scripts/SteamLanguageSwitcher.user.js
-// @updateURL https://github.com/Kanadeforever/Kanade-s-Miscellaneous-Storage/raw/main/Browser%20Scripts/SteamLanguageSwitcher.user.js
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @downloadURL  https://github.com/Kanadeforever/Kanade-s-Miscellaneous-Storage/raw/main/Browser%20Scripts/SteamLanguageSwitcher.user.js
+// @updateURL    https://github.com/Kanadeforever/Kanade-s-Miscellaneous-Storage/raw/main/Browser%20Scripts/SteamLanguageSwitcher.user.js
 // @run-at       document-end
 // ==/UserScript==
 
@@ -40,14 +41,20 @@
 
         const bar = document.createElement('div');
         bar.id = 'steam-lang-bar';
-        bar.style.cssText = [
-            'position: fixed; top: 6px; right: 16px; z-index: 99999;',
-            'display: flex; gap: 4px; padding: 6px 8px;',
-            'background: rgba(23, 26, 33, 0.92); border-radius: 8px;',
-            'box-shadow: 0 2px 12px rgba(0,0,0,0.4);',
-            'font-family: "Motiva Sans", Arial, sans-serif; font-size: 13px;',
-            'user-select: none; cursor: move;',
-        ].join('');
+
+        // 窄窗口（Steam widget 等）自动压缩
+        const saved = GM_getValue('steam-lang-bar-pos');
+        const compact = window.innerWidth < 480;
+        const cssBase = 'position: fixed; ' +
+            (saved ? 'left: ' + saved.x + 'px; top: ' + saved.y + 'px;' : 'top: 6px; right: 16px;') +
+            'z-index: 99999; display: flex; gap: ' + (compact ? '1px' : '4px') + ';' +
+            'padding: ' + (compact ? '2px 3px' : '6px 8px') + ';' +
+            'background: rgba(23, 26, 33, 0.92); border-radius: ' + (compact ? '4px' : '8px') + ';' +
+            'box-shadow: 0 2px 12px rgba(0,0,0,0.4);' +
+            'font-family: "Motiva Sans", Arial, sans-serif; font-size: ' + (compact ? '11px' : '13px') + ';' +
+            'user-select:none; cursor:move;';
+
+        bar.style.cssText = cssBase;
 
         // ---- 拖拽 ----
         let dragging = false, ox, oy;
@@ -65,14 +72,21 @@
             bar.style.left = (e.clientX - ox) + 'px';
             bar.style.top  = (e.clientY - oy) + 'px';
         });
-        document.addEventListener('mouseup', () => { dragging = false; });
+        document.addEventListener('mouseup', () => {
+            if (!dragging) return;
+            dragging = false;
+            GM_setValue('steam-lang-bar-pos', {
+                x: parseInt(bar.style.left),
+                y: parseInt(bar.style.top)
+            });
+        });
 
         for (const l of LANGS) {
             const btn = document.createElement('button');
             btn.textContent = l.label;
             btn.title = l.label;
             btn.style.cssText = [
-                'padding: 5px 10px; border: none; border-radius: 4px;',
+                'padding: ' + (compact ? '2px 5px' : '5px 10px') + '; border: none; border-radius: 4px;',
                 'background: ' + (l.code === cur ? 'rgba(255,255,255,0.18)' : 'transparent') + ';',
                 'color: ' + (l.code === cur ? '#fff' : '#b0b0b0') + ';',
                 'cursor: pointer; white-space: nowrap;',
@@ -98,9 +112,9 @@
         closeBtn.textContent = '✕';
         closeBtn.title = '隐藏切换栏';
         closeBtn.style.cssText = [
-            'padding: 5px 6px; border: none; border-radius: 4px;',
+            'padding: ' + (compact ? '2px 4px' : '5px 6px') + '; border: none; border-radius: 4px;',
             'background: transparent; color: #666;',
-            'cursor: pointer; font-size: 12px;',
+            'cursor: pointer; font-size: ' + (compact ? '10px' : '12px') + ';',
             'transition: color 0.15s;',
         ].join('');
         closeBtn.addEventListener('mouseenter', () => { closeBtn.style.color = '#e44'; });
