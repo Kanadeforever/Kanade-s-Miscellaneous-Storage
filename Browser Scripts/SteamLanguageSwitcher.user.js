@@ -1,15 +1,14 @@
 // ==UserScript==
 // @name         Steam Language Switcher
 // @namespace    https://github.com/Kanadeforever
-// @version      1.1.1
-// @description  在 Steam 页面快速切换语言：简中 / 繁中 / 日本語 / English
+// @version      1.1.3
+// @description  在 Steam 页面右上角添加语言切换条（简中/繁中/日本語/EN），可拖拽，自动记忆位置（widget 除外），窄窗口自动压缩
 // @author       Luminous
 // @match        https://store.steampowered.com/*
 // @match        https://steamcommunity.com/*
 // @match        https://help.steampowered.com/*
 // @match        https://steampowered.com/*
-// @grant        GM_setValue
-// @grant        GM_getValue
+// @grant        none
 // @downloadURL  https://github.com/Kanadeforever/Kanade-s-Miscellaneous-Storage/raw/main/Browser%20Scripts/SteamLanguageSwitcher.user.js
 // @updateURL    https://github.com/Kanadeforever/Kanade-s-Miscellaneous-Storage/raw/main/Browser%20Scripts/SteamLanguageSwitcher.user.js
 // @run-at       document-end
@@ -42,9 +41,11 @@
         const bar = document.createElement('div');
         bar.id = 'steam-lang-bar';
 
-        // 窄窗口（Steam widget 等）自动压缩
-        const saved = GM_getValue('steam-lang-bar-pos');
-        const compact = window.innerWidth < 480 || window.innerHeight < 300;
+        // 窄窗口自动压缩；widget 额外判断（不保存坐标）
+        let saved = null;
+        try { saved = JSON.parse(localStorage.getItem('steam-lang-bar-pos')); } catch (e) {}
+        const isWidget = location.pathname.startsWith('/widget/');
+        const compact = isWidget || window.innerWidth < 480 || window.innerHeight < 300;
         const cssBase = 'position: fixed; ' +
             (saved ? 'left: ' + saved.x + 'px; top: ' + saved.y + 'px;' : 'top: 6px; right: 16px;') +
             'z-index: 99999; display: flex; gap: ' + (compact ? '1px' : '4px') + ';' +
@@ -56,10 +57,19 @@
 
         bar.style.cssText = cssBase;
 
+        // ---- 拖拽手柄 ----
+        const handle = document.createElement('span');
+        handle.textContent = '⋮';
+        handle.title = '拖拽移动';
+        handle.style.cssText = 'padding:0 4px;cursor:grab;color:#666;font-size:' +
+            (compact ? '10px' : '13px') + ';line-height:1;user-select:none';
+        handle.addEventListener('mousedown', e => { e.stopPropagation(); });
+        bar.prepend(handle);
+
         // ---- 拖拽 ----
         let dragging = false, ox, oy;
         bar.addEventListener('mousedown', e => {
-            if (e.target !== bar) return;  // 点在按钮上不拖
+            if (e.target !== bar && e.target !== handle) return;
             dragging = true;
             const rect = bar.getBoundingClientRect();
             ox = e.clientX - rect.left;
@@ -75,10 +85,14 @@
         document.addEventListener('mouseup', () => {
             if (!dragging) return;
             dragging = false;
-            GM_setValue('steam-lang-bar-pos', {
-                x: parseInt(bar.style.left),
-                y: parseInt(bar.style.top)
-            });
+            try {
+                if (!isWidget) {  // widget 不保存坐标，避免污染商店位置
+                    localStorage.setItem('steam-lang-bar-pos', JSON.stringify({
+                        x: parseInt(bar.style.left),
+                        y: parseInt(bar.style.top)
+                    }));
+                }
+            } catch (e) {}
         });
 
         for (const l of LANGS) {
