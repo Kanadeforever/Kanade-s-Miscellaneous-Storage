@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Language Switcher
 // @namespace    https://github.com/Kanadeforever
-// @version      1.1.6
+// @version      1.1.6-fix
 // @description  在 Steam 页面右上角添加语言切换条（简中/繁中/日本語/EN），可拖拽，自动记忆位置（widget 除外），窄窗口自动压缩
 // @author       Luminous
 // @match        https://store.steampowered.com/*
@@ -69,8 +69,8 @@
         const handle = document.createElement('span');
         handle.textContent = '⋮';
         handle.title = '拖拽移动';
-        handle.style.cssText = 'padding:0 4px;cursor:grab;color:#666;font-size:' +
-            (compact ? '10px' : '13px') + ';line-height:1;user-select:none';
+        handle.style.cssText = 'display:flex;align-items:center;padding:0 4px;cursor:grab;color:#888;font-size:' +
+            (compact ? '13px' : '15px') + ';line-height:1;user-select:none';
         bar.prepend(handle);
 
         // ---- 拖拽 ----
