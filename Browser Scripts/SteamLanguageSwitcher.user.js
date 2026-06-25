@@ -44,7 +44,7 @@
 
         // 窄窗口（Steam widget 等）自动压缩
         const saved = GM_getValue('steam-lang-bar-pos');
-        const compact = window.innerWidth < 480;
+        const compact = window.innerWidth < 480 || window.innerHeight < 300;
         const cssBase = 'position: fixed; ' +
             (saved ? 'left: ' + saved.x + 'px; top: ' + saved.y + 'px;' : 'top: 6px; right: 16px;') +
             'z-index: 99999; display: flex; gap: ' + (compact ? '1px' : '4px') + ';' +
