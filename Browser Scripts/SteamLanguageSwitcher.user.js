@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Language Switcher
 // @namespace    https://github.com/Kanadeforever
-// @version      1.1.6-fix
+// @version      1.1.7
 // @description  在 Steam 页面右上角添加语言切换条（简中/繁中/日本語/EN），可拖拽，自动记忆位置（widget 除外），窄窗口自动压缩
 // @author       Luminous
 // @match        https://store.steampowered.com/*
