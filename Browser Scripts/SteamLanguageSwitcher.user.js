@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam Language Switcher
 // @namespace    https://github.com/Kanadeforever
-// @version      1.1.3
+// @version      1.1.5
 // @description  在 Steam 页面右上角添加语言切换条（简中/繁中/日本語/EN），可拖拽，自动记忆位置（widget 除外），窄窗口自动压缩
 // @author       Luminous
 // @match        https://store.steampowered.com/*
@@ -41,10 +41,13 @@
         const bar = document.createElement('div');
         bar.id = 'steam-lang-bar';
 
-        // 窄窗口自动压缩；widget 额外判断（不保存坐标）
-        let saved = null;
-        try { saved = JSON.parse(localStorage.getItem('steam-lang-bar-pos')); } catch (e) {}
+        // widget 不使用商店坐标，窄窗口自动压缩
         const isWidget = location.pathname.startsWith('/widget/');
+        let saved = null;
+        if (!isWidget) {
+            try { saved = JSON.parse(localStorage.getItem('steam-lang-bar-pos')); } catch (e) {}
+            if (saved && (saved.x > window.innerWidth - 50 || saved.y > window.innerHeight - 50)) saved = null;
+        }
         const compact = isWidget || window.innerWidth < 480 || window.innerHeight < 300;
         const cssBase = 'position: fixed; ' +
             (saved ? 'left: ' + saved.x + 'px; top: ' + saved.y + 'px;' : 'top: 6px; right: 16px;') +
@@ -63,7 +66,6 @@
         handle.title = '拖拽移动';
         handle.style.cssText = 'padding:0 4px;cursor:grab;color:#666;font-size:' +
             (compact ? '10px' : '13px') + ';line-height:1;user-select:none';
-        handle.addEventListener('mousedown', e => { e.stopPropagation(); });
         bar.prepend(handle);
 
         // ---- 拖拽 ----
@@ -135,14 +137,11 @@
         closeBtn.addEventListener('mouseleave', () => { closeBtn.style.color = '#666'; });
         closeBtn.addEventListener('click', () => {
             bar.remove();
-            sessionStorage.setItem('steam-lang-bar-hidden', '1');
         });
         bar.appendChild(closeBtn);
 
         document.body.appendChild(bar);
     }
-
-    if (sessionStorage.getItem('steam-lang-bar-hidden')) return;
 
     if (document.body) {
         buildUI();
