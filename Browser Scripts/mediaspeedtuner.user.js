@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Media Speed Tuner
 // @namespace    https://github.com/Kanadeforever
-// @version      1.0.0
+// @version      1.0.1
 // @description  全局视频/音频倍速控制，支持可配置快捷键、OSD 屏幕提示、跨页面速度共享
 // @author       Luminous
 // @match        *://*/*
@@ -235,8 +235,27 @@
     }
 
     // ═══════════════════════════════════════════
-    // 媒体检测（v1.0.0 原样）
+    // 媒体检测
     // ═══════════════════════════════════════════
+
+    // 递归扫描元素及其 Shadow DOM 子树中的媒体
+    function scanMediaIn(root) {
+        if (!root) return;
+        var list = root.querySelectorAll('video, audio');
+        for (var i = 0; i < list.length; i++) {
+            if (!mediaSet.has(list[i])) {
+                mediaSet.add(list[i]);
+                setSpeedOnElement(list[i], currentSpeed);
+            }
+        }
+        // 穿透 open Shadow DOM
+        var all = root.querySelectorAll('*');
+        for (var j = 0; j < all.length; j++) {
+            if (all[j].shadowRoot) scanMediaIn(all[j].shadowRoot);
+        }
+    }
+
+    // 事件捕获：首次 play/playing/timeupdate/loadedmetadata 时登记并设速
     function handleMediaEvent(e) {
         if (!e.isTrusted) return;
         var target = e.target;
@@ -246,19 +265,59 @@
         }
     }
 
+    // 网站自己改了速度 → 抢回来
+    function handleRateChange(e) {
+        if (!e.isTrusted) return;
+        var target = e.target;
+        if (target instanceof HTMLMediaElement &&
+            mediaSet.has(target) &&
+            Math.abs(target.playbackRate - currentSpeed) > 0.001) {
+            setSpeedOnElement(target, currentSpeed);
+        }
+    }
+
     function setupMediaDetection() {
+        // 事件捕获
         window.addEventListener('play', handleMediaEvent, { capture: true, passive: true });
         window.addEventListener('playing', handleMediaEvent, { capture: true, passive: true });
         window.addEventListener('timeupdate', handleMediaEvent, { capture: true, passive: true });
         window.addEventListener('loadedmetadata', handleMediaEvent, { capture: true, passive: true });
+        window.addEventListener('ratechange', handleRateChange, { capture: true, passive: true });
 
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', function () {
-                applySpeedToAll(currentSpeed);
-            });
-        } else {
-            applySpeedToAll(currentSpeed);
+        // DOM 就绪后全量扫描
+        function readyScan() {
+            scanMediaIn(document);
         }
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', readyScan);
+        } else {
+            readyScan();
+        }
+
+        // MutationObserver：动态插入的媒体元素
+        function startMO() {
+            if (!document.documentElement) {
+                requestAnimationFrame(startMO);
+                return;
+            }
+            var mo = new MutationObserver(function (muts) {
+                for (var i = 0; i < muts.length; i++) {
+                    var added = muts[i].addedNodes;
+                    for (var j = 0; j < added.length; j++) {
+                        var node = added[j];
+                        if (node.nodeType === 1) { // Element
+                            if (node instanceof HTMLMediaElement && !mediaSet.has(node)) {
+                                mediaSet.add(node);
+                                setSpeedOnElement(node, currentSpeed);
+                            }
+                            if (node.querySelectorAll) scanMediaIn(node);
+                        }
+                    }
+                }
+            });
+            mo.observe(document.documentElement, { childList: true, subtree: true });
+        }
+        startMO();
     }
 
     // ═══════════════════════════════════════════
