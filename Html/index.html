@@ -1,0 +1,2081 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Markdown看板</title>
+    <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f5f7f9;
+            padding: 20px;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: linear-gradient(135deg, #6a11cb 0%, #2575fc 100%);
+            color: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            font-size: 2.5rem;
+        }
+
+        .instructions {
+            background-color: #e8f4fc;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-size: 0.9rem;
+            border-left: 4px solid #3498db;
+        }
+
+        .instructions ul {
+            margin-left: 20px;
+            margin-top: 10px;
+        }
+
+        .kanban-container {
+            display: flex;
+            gap: 20px;
+            overflow-x: auto;
+            padding-bottom: 20px;
+        }
+
+        .column {
+            flex: 0 0 320px;
+            background-color: #e6e9ed;
+            border-radius: 10px;
+            padding: 15px;
+            min-height: 500px;
+            box-shadow: 0 3px 10px rgba(0, 0, 0, 0.08);
+        }
+
+        .column-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #ccc;
+        }
+
+        .column-title {
+            font-weight: bold;
+            font-size: 1.2rem;
+            color: #2c3e50;
+            padding: 5px 10px;
+            border-radius: 4px;
+            width: 70%;
+        }
+
+        .column-title:focus {
+            outline: 2px solid #3498db;
+            background-color: #f8f9fa;
+        }
+
+        .delete-column {
+            background: #e74c3c;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s ease;
+        }
+
+        .delete-column:hover {
+            background: #c0392b;
+            transform: translateY(-2px);
+        }
+
+        .card {
+            background: white;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+            cursor: move;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            position: relative;
+            padding-left: 45px; /* 增加左侧内边距，为checkbox留出空间 */
+        }
+
+        .card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.12);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 10px;
+        }
+
+        .card-title {
+            font-weight: bold;
+            font-size: 1.1rem;
+            flex: 1;
+            margin-right: 10px;
+        }
+
+        /* 统一表单元素样式 */
+        .card-title-input {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-family: inherit;
+            font-size: 0.9rem;
+        }
+
+        .card-content {
+            min-height: 40px;
+            margin-bottom: 10px;
+            color: #555;
+        }
+
+        .card-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+
+        .card-actions button {
+            border: none;
+            background: none;
+            cursor: pointer;
+            font-size: 0.9rem;
+            color: #7f8c8d;
+            padding: 5px;
+            border-radius: 4px;
+            transition: all 0.2s ease;
+        }
+
+        .card-actions button:hover {
+            color: #2c3e50;
+            background: #f5f7f9;
+        }
+
+        .add-card-form {
+            margin-top: 10px;
+            display: none;
+        }
+
+        .add-card-form textarea {
+            width: 100%;
+            min-height: 80px;
+            padding: 10px;
+            margin-bottom: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            resize: vertical;
+            font-family: inherit;
+        }
+
+        .add-card-form-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        /* 美化表单按钮 */
+        .add-card-form-actions button {
+            padding: 8px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s ease;
+        }
+
+        .add-card-btn {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s ease;
+            width: 100%;
+            text-align: left;
+        }
+
+        .add-card-btn:hover {
+            background: #2980b9;
+        }
+
+        .add-card-form-actions .add-btn {
+            background: #2ecc71;
+            color: white;
+        }
+
+        .add-card-form-actions .add-btn:hover {
+            background: #27ae60;
+        }
+
+        .add-card-form-actions .cancel-btn {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .add-card-form-actions .cancel-btn:hover {
+            background: #c0392b;
+        }
+
+        .add-column {
+            flex: 0 0 200px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #add-column-btn {
+            background: #2ecc71;
+            color: white;
+            border: none;
+            padding: 12px 18px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: all 0.2s ease;
+        }
+
+        #add-column-btn:hover {
+            background: #27ae60;
+            transform: translateY(-2px);
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .modal-content {
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 700px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #eee;
+        }
+
+        /* 自定义输入模态框样式 */
+        .custom-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .custom-modal-content {
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 500px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .custom-modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .custom-modal-body {
+            margin-bottom: 20px;
+        }
+
+        .custom-modal-input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 1rem;
+            margin-bottom: 15px;
+        }
+
+        .custom-modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        .custom-modal-btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .custom-modal-confirm {
+            background: #2ecc71;
+            color: white;
+        }
+
+        .custom-modal-cancel {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .close {
+            font-size: 1.8rem;
+            cursor: pointer;
+            color: #7f8c8d;
+            transition: color 0.2s ease;
+        }
+
+        .close:hover {
+            color: #e74c3c;
+        }
+
+        .card-detail-view {
+            margin-bottom: 20px;
+        }
+
+        .card-detail-title {
+            font-size: 1.5rem;
+            font-weight: bold;
+            margin-bottom: 15px;
+            padding: 10px;
+            border: 1px solid #eee;
+            border-radius: 4px;
+        }
+
+        .card-detail-content {
+            margin-bottom: 20px;
+            padding: 10px;
+            border: 1px solid #eee;
+            border-radius: 4px;
+            min-height: 100px;
+        }
+
+        .card-detail-actions {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .detail-action-btn {
+            padding: 8px 15px;
+            background: #f0f0f0;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .detail-action-btn:hover {
+            background: #e0e0e0;
+        }
+
+        .subtasks-section {
+            margin-bottom: 20px;
+        }
+
+        .subtasks-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .subtask {
+            display: flex;
+            align-items: center;
+            padding: 8px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .subtask:last-child {
+            border-bottom: none;
+        }
+
+        .subtask-checkbox {
+            display: none;
+        }
+
+        .subtask-checkbox-label {
+            width: 18px;
+            height: 18px;
+            background: white;
+            border: 2px solid #ddd;
+            border-radius: 3px;
+            cursor: pointer;
+            margin-right: 10px;
+            display: inline-block;
+            vertical-align: middle;
+            transition: all 0.2s ease;
+        }
+
+        .subtask-checkbox-label.checked {
+            background: #2ecc71;
+            border-color: #2ecc71;
+        }
+
+        .subtask-checkbox-label.checked::after {
+            content: '';
+            display: block;
+            margin-left: 5px;
+            margin-top: 2px;
+            width: 4px;
+            height: 8px;
+            border: solid white;
+            border-width: 0 2px 2px 0;
+            transform: rotate(45deg);
+        }
+
+        .subtask-content {
+            flex: 1;
+        }
+
+        .subtask-actions {
+            display: flex;
+            gap: 5px;
+        }
+
+        .progress-bar {
+            height: 8px;
+            background: #f0f0f0;
+            border-radius: 4px;
+            margin-bottom: 5px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: #2ecc71;
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+
+        .progress-text {
+            font-size: 0.8rem;
+            color: #7f8c8d;
+            text-align: right;
+        }
+
+        .edit-mode {
+            display: none;
+        }
+
+        .edit-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-top: 20px;
+        }
+
+        .edit-actions button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        #save-edit {
+            background: #2ecc71;
+            color: white;
+        }
+
+        #cancel-edit {
+            background: #e74c3c;
+            color: white;
+        }
+
+        .format-toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+
+        .format-btn {
+            padding: 8px 12px;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .format-btn:hover {
+            background: #e8f4fc;
+            border-color: #3498db;
+        }
+
+
+        /* 日期选择器样式 */
+        .date-picker {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .date-inputs {
+            display: flex;
+            gap: 10px;
+        }
+
+        .date-input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+
+        .calendar {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 5px;
+        }
+
+        .calendar-header {
+            grid-column: span 7;
+            text-align: center;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+
+        .calendar-cell {
+            padding: 8px;
+            text-align: center;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+
+        .calendar-cell:hover {
+            background: #f0f0f0;
+        }
+
+        .calendar-cell.selected {
+            background: #3498db;
+            color: white;
+        }
+
+        .calendar-cell.disabled {
+            color: #ccc;
+            cursor: not-allowed;
+        }
+
+        .week-day {
+            font-weight: bold;
+            background: #f5f7f9;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 150px;
+            padding: 15px;
+            margin-bottom: 15px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            resize: vertical;
+            font-family: 'Courier New', monospace;
+            line-height: 1.5;
+        }
+
+        .markdown-preview {
+            border: 1px solid #eee;
+            border-radius: 6px;
+            padding: 15px;
+            margin-top: 15px;
+            background: #f8f9fa;
+            min-height: 100px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .dragging {
+            opacity: 0.6;
+            transform: rotate(5deg);
+        }
+
+        #drag-mirror {
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+            transition: transform 0.2s ease;
+        }
+
+        .dropzone {
+            background-color: rgba(46, 204, 113, 0.2);
+            min-height: 100px;
+            border: 2px dashed #2ecc71;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+
+        .drop-indicator {
+            height: 4px;
+            background-color: #2ecc71;
+            border-radius: 2px;
+            margin: 5px 0;
+            opacity: 0.8;
+        }
+
+        .file-actions {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-top: 30px;
+        }
+
+        .file-actions button {
+            padding: 12px 25px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        #save-file {
+            background: #2ecc71;
+            color: white;
+        }
+
+        #save-file:hover {
+            background: #27ae60;
+            transform: translateY(-2px);
+        }
+
+        #load-file {
+            background: #3498db;
+            color: white;
+        }
+
+        #load-file:hover {
+            background: #2980b9;
+            transform: translateY(-2px);
+        }
+
+        #file-input {
+            display: none;
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 40px;
+            color: #7f8c8d;
+            font-size: 0.9rem;
+            padding: 15px;
+            border-top: 1px solid #eee;
+        }
+
+        .completed {
+            opacity: 0.7;
+            background-color: #f8fff8;
+        }
+
+        .completed .card-title {
+            text-decoration: line-through;
+        }
+
+        .card-checkbox {
+            display: none;
+        }
+
+        .card-checkbox-label {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            width: 20px;
+            height: 20px;
+            background: white;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .card-checkbox-label.checked {
+            background: #2ecc71;
+            border-color: #2ecc71;
+        }
+
+        .card-checkbox-label.checked::after {
+            content: '';
+            position: absolute;
+            left: 6px;
+            top: 2px;
+            width: 6px;
+            height: 12px;
+            border: solid white;
+            border-width: 0 2px 2px 0;
+            transform: rotate(45deg);
+        }
+
+        .tags-container {
+            display: flex;
+            gap: 5px;
+            margin-bottom: 10px;
+        }
+        .tag {
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            color: white;
+        }
+
+        /* 标签选择器样式 */
+        .tag-colors {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .tag-color-option {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: transform 0.2s ease;
+            border: 3px solid transparent;
+        }
+
+        .tag-color-option:hover {
+            transform: scale(1.1);
+        }
+
+        .tag-color-option.selected {
+            border-color: #2c3e50;
+            transform: scale(1.1);
+        }
+
+        .tag-text-input {
+            margin: 20px 0;
+        }
+
+        .tag-text-input input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+
+        /* 更新标签显示样式 */
+        .tag {
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 0.8rem;
+            color: white;
+            margin-right: 5px;
+            display: inline-block;
+        }
+
+        .tag-red { background: #e74c3c; }
+        .tag-orange { background: #f39c12; }
+        .tag-yellow { background: #f1c40f; color: #2c3e50; }
+        .tag-green { background: #2ecc71; }
+        .tag-blue { background: #3498db; }
+        .tag-purple { background: #9b59b6; }
+        .tag-gray { background: #95a5a6; }
+
+        /* 添加对应的CSS样式 */
+        .subtask-status {
+            font-size: 0.8rem;
+            color: #7f8c8d;
+            margin-top: 8px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .due-date {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 0.9rem;
+            color: #7f8c8d;
+            margin-bottom: 10px;
+        }
+
+        .due-date.overdue {
+            color: #e74c3c;
+            font-weight: bold;
+        }
+
+        .confirmation-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            align-items: center;
+            justify-content: center;
+            z-index: 1100;
+        }
+
+        .confirmation-content {
+            background: white;
+            padding: 25px;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 400px;
+            text-align: center;
+        }
+
+        .confirmation-actions {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .confirmation-actions button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .confirm-btn {
+            background: #2ecc71;
+            color: white;
+        }
+
+        .cancel-btn {
+            background: #e74c3c;
+            color: white;
+        }
+
+        @media (max-width: 768px) {
+            .kanban-container {
+                flex-direction: column;
+            }
+
+            .column {
+                width: 100%;
+                flex: 1;
+            }
+
+            .add-column {
+                width: 100%;
+                flex: 1;
+                margin-top: 20px;
+            }
+
+            .file-actions {
+                flex-direction: column;
+                gap: 15px;
+            }
+        }
+
+        /* 黑暗模式样式 */
+        body.dark-mode {
+            background-color: #1e1e1e;
+            color: #d4d4d4;
+        }
+
+        body.dark-mode header {
+            background: linear-gradient(135deg, #3c3c3c 0%, #2d2d30 100%);
+        }
+
+        body.dark-mode .instructions {
+            background-color: #2d2d30;
+            border-left: 4px solid #4ec9b0;
+        }
+
+        body.dark-mode .column {
+            background-color: #252526;
+        }
+
+        body.dark-mode .column-title {
+            color: #d4d4d4;
+        }
+
+        body.dark-mode .column-title:focus {
+            background-color: #3c3c3c;
+        }
+
+        body.dark-mode .card {
+            background: #2d2d30;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+        }
+
+        body.dark-mode .card:hover {
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.6);
+        }
+
+        body.dark-mode .card-content,
+        body.dark-mode .card-title,
+        body.dark-mode .card-detail-title,
+        body.dark-mode .card-detail-content,
+        body.dark-mode .subtask-content,
+        body.dark-mode .due-date,
+        body.dark-mode .progress-text,
+        body.dark-mode .subtask-status {
+            color: #d4d4d4;
+        }
+
+        body.dark-mode .card-title-input,
+        body.dark-mode .add-card-form textarea,
+        body.dark-mode .date-input,
+        body.dark-mode .tag-text-input input {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border: 1px solid #3c3c3c;
+        }
+
+        body.dark-mode .card-actions button:hover {
+            color: #d4d4d4;
+            background: #3c3c3c;
+        }
+
+        body.dark-mode .modal-content {
+            background: #2d2d30;
+            color: #d4d4d4;
+        }
+
+        body.dark-mode textarea {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border: 1px solid #3c3c3c;
+        }
+
+        body.dark-mode .format-toolbar {
+            background: #252526;
+        }
+
+        body.dark-mode .format-btn {
+            background: #3c3c3c;
+            color: #d4d4d4;
+            border: 1px solid #4ec9b0;
+        }
+
+        body.dark-mode .format-btn:hover {
+            background: #4ec9b0;
+            color: #1e1e1e;
+        }
+
+        body.dark-mode .markdown-preview {
+            background: #252526;
+            border: 1px solid #3c3c3c;
+            color: #d4d4d4;
+        }
+
+        body.dark-mode .completed {
+            background-color: #1e2e1e;
+        }
+
+        /* 黑暗模式适配 */
+        body.dark-mode .custom-modal-content {
+            background: #2d2d30;
+            color: #d4d4d4;
+        }
+
+        body.dark-mode .custom-modal-input {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border: 1px solid #3c3c3c;
+        }
+
+        body.dark-mode .calendar-cell:hover {
+            background: #3c3c3c;
+        }
+
+        body.dark-mode .week-day {
+            background: #252526;
+        }
+
+        /* 子任务删除按钮样式 */
+        .subtask-delete-btn {
+            color: #e74c3c;
+            background: rgba(231, 76, 60, 0.1);
+            border: none;
+            border-radius: 5px;
+            padding: 8px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 36px;
+            height: 36px;
+        }
+
+        .subtask-delete-btn:hover {
+            background: rgba(231, 76, 60, 0.2);
+            transform: scale(1.1);
+        }
+
+        .subtask-delete-btn i {
+            font-size: 18px;
+        }
+
+        /* 黑暗模式切换按钮 */
+        .theme-switch {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 1000;
+        }
+
+        .theme-switch-btn {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            background: #3498db;
+            color: white;
+            border: none;
+            cursor: pointer;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+            transition: all 0.3s ease;
+        }
+
+        body.dark-mode .theme-switch-btn {
+            background: #4ec9b0;
+        }
+
+        .theme-switch-btn:hover {
+            transform: scale(1.1);
+        }
+
+        @media (max-width: 768px) {
+            .theme-switch {
+                bottom: 70px;
+                right: 15px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h1><i class="ri-layout-column-line"></i> Markdown看板</h1>
+        <!-- <p>增强版本地看板应用 - 支持标签、时间戳和子任务</p> -->
+    </header>
+
+    <div class="instructions">
+        <p><strong>使用说明：</strong></p>
+        <ul>
+            <li>点击"添加卡片"按钮直接在当前列创建卡片</li>
+            <li>悬停卡片时右上角显示完成状态复选框</li>
+            <li>点击卡片进入查看模式，可添加标签、设置到期时间和子任务</li>
+            <li>右下角按钮切换黑暗模式</li>
+        </ul>
+    </div>
+
+    <div class="kanban-container" id="kanban-container">
+        <!-- 列将通过JavaScript动态添加 -->
+    </div>
+
+    <div class="file-actions">
+        <button id="save-file">
+            <i class="ri-save-line"></i> 保存到Markdown文件
+        </button>
+        <button id="load-file">
+            <i class="ri-folder-open-line"></i> 从Markdown文件加载
+        </button>
+        <input type="file" id="file-input" accept=".md">
+    </div>
+
+    <!-- 卡片详情/编辑模态框 -->
+    <div class="modal" id="card-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modal-title"><i class="ri-edit-line"></i> 卡片详情</h2>
+                <span class="close">&times;</span>
+            </div>
+
+            <div class="card-detail-view" id="card-detail-view">
+                <div class="card-detail-title" id="card-detail-title" contenteditable="true"></div>
+
+                <div class="tags-container" id="tags-container"></div>
+
+                <div class="due-date" id="due-date-container"></div>
+
+                <div class="subtasks-section">
+                    <div class="subtasks-header">
+                        <h3>子任务</h3>
+                        <button class="detail-action-btn" id="add-subtask-btn">
+                            <i class="ri-add-line"></i> 添加子任务
+                        </button>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="subtask-progress"></div>
+                    </div>
+                    <div class="progress-text" id="subtask-progress-text"></div>
+                    <div id="subtasks-list"></div>
+                </div>
+
+                <div class="card-detail-content" id="card-detail-content"></div>
+
+                <div class="card-detail-actions">
+                    <button class="detail-action-btn" id="add-tag-btn">
+                        <i class="ri-price-tag-line"></i> 添加标签
+                    </button>
+                    <button class="detail-action-btn" id="set-due-date-btn">
+                        <i class="ri-time-line"></i> 设置到期时间
+                    </button>
+                    <button class="detail-action-btn" id="edit-card-btn">
+                        <i class="ri-edit-line"></i> 编辑卡片
+                    </button>
+                </div>
+            </div>
+
+            <div class="edit-mode" id="edit-mode">
+                <div class="format-toolbar">
+                    <button class="format-btn" data-prefix="**" data-suffix="**" title="加粗">
+                        <i class="ri-bold"></i>
+                    </button>
+                    <button class="format-btn" data-prefix="*" data-suffix="*" title="斜体">
+                        <i class="ri-italic"></i>
+                    </button>
+                    <button class="format-btn" data-prefix="`" data-suffix="`" title="代码">
+                        <i class="ri-code-line"></i>
+                    </button>
+                    <button class="format-btn" data-prefix="# " data-suffix="" title="标题1">
+                        H1
+                    </button>
+                    <button class="format-btn" data-prefix="## " data-suffix="" title="标题2">
+                        H2
+                    </button>
+                </div>
+
+                <textarea id="card-content-text" placeholder="输入卡片内容，支持Markdown语法..."></textarea>
+
+                <div class="markdown-preview" id="markdown-preview">
+                    <p>预览将显示在这里...</p>
+                </div>
+
+                <div class="edit-actions">
+                    <button id="save-edit">
+                        <i class="ri-check-line"></i> 保存
+                    </button>
+                    <button id="cancel-edit">
+                        <i class="ri-close-line"></i> 取消
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 标签选择器模态框 -->
+    <div class="modal" id="tag-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2><i class="ri-price-tag-line"></i> 选择标签</h2>
+                <span class="close" id="close-tag-modal">&times;</span>
+            </div>
+
+            <div class="tag-colors">
+                <div class="tag-color-option" data-color="red" style="background: #e74c3c;"></div>
+                <div class="tag-color-option" data-color="orange" style="background: #f39c12;"></div>
+                <div class="tag-color-option" data-color="yellow" style="background: #f1c40f;"></div>
+                <div class="tag-color-option" data-color="green" style="background: #2ecc71;"></div>
+                <div class="tag-color-option" data-color="blue" style="background: #3498db;"></div>
+                <div class="tag-color-option" data-color="purple" style="background: #9b59b6;"></div>
+                <div class="tag-color-option" data-color="gray" style="background: #95a5a6;"></div>
+            </div>
+
+            <div class="tag-text-input">
+                <input type="text" id="tag-text" placeholder="输入标签文本（可选）">
+            </div>
+
+            <div class="custom-modal-actions modal-actions">
+                <button id="confirm-tag" class="custom-modal-btn custom-modal-confirm">确认</button>
+                <button id="cancel-tag" class="custom-modal-btn custom-modal-cancel">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 确认删除模态框 -->
+    <div class="confirmation-modal" id="confirmation-modal">
+        <div class="confirmation-content">
+            <h3 id="confirmation-message">确定要删除吗？</h3>
+            <div class="confirmation-actions">
+                <button class="confirm-btn" id="confirmation-confirm">确定</button>
+                <button class="cancel-btn" id="confirmation-cancel">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 自定义输入模态框 -->
+    <div class="custom-modal" id="input-modal">
+        <div class="custom-modal-content">
+            <div class="custom-modal-header">
+                <h2 id="input-modal-title">输入</h2>
+                <span class="close" id="close-input-modal">&times;</span>
+            </div>
+            <div class="custom-modal-body">
+                <input type="text" class="custom-modal-input" id="input-modal-field" placeholder="请输入内容">
+            </div>
+            <div class="custom-modal-actions">
+                <button class="custom-modal-btn custom-modal-confirm" id="input-modal-confirm">确认</button>
+                <button class="custom-modal-btn custom-modal-cancel" id="input-modal-cancel">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 日期选择模态框 -->
+    <div class="custom-modal" id="date-modal">
+        <div class="custom-modal-content">
+            <div class="custom-modal-header">
+                <h2>选择日期</h2>
+                <span class="close" id="close-date-modal">&times;</span>
+            </div>
+            <div class="custom-modal-body">
+                <div class="date-picker">
+                    <div class="date-inputs">
+                        <input type="number" class="date-input" id="date-year" placeholder="年" min="2000" max="2100">
+                        <input type="number" class="date-input" id="date-month" placeholder="月" min="1" max="12">
+                        <input type="number" class="date-input" id="date-day" placeholder="日" min="1" max="31">
+                    </div>
+                    <div class="calendar" id="calendar"></div>
+                </div>
+            </div>
+            <div class="custom-modal-actions">
+                <button class="custom-modal-btn custom-modal-confirm" id="date-modal-confirm">确认</button>
+                <button class="custom-modal-btn custom-modal-cancel" id="date-modal-cancel">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 黑暗模式切换按钮 -->
+    <div class="theme-switch">
+        <button class="theme-switch-btn" id="theme-switch">
+            <i class="ri-moon-line"></i>
+        </button>
+    </div>
+
+    <footer>
+        <p>基于Markdown的看板应用 | 支持标签、时间戳和子任务</p>
+    </footer>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const initialData = [
+                { title: '待处理', cards: [
+                    { title: '任务1', content: '- 这是待处理的任务', completed: false, tags: [{ color: 'red', text: '高优先级' }], dueDate: null, subtasks: [{ title: '子任务1', completed: false }, { title: '子任务2', completed: true }] },
+                    { title: '任务2', content: '- 另一个待办事项', completed: false, tags: [{ color: 'orange', text: '中优先级' }], dueDate: '2023-12-31', subtasks: [] }
+                ] },
+                { title: '进行中', cards: [
+                    { title: '任务3', content: '- 正在进行的任务', completed: false, tags: [{ color: 'green', text: '低优先级' }], dueDate: null, subtasks: [] },
+                    { title: '任务4', content: '- 另一个进行中的任务', completed: false, tags: [{ color: 'blue', text: '功能开发' }], dueDate: '2023-12-15', subtasks: [{ title: '设计阶段', completed: true }, { title: '开发阶段', completed: false }, { title: '测试阶段', completed: false }] }
+                ] },
+                { title: '已完成', cards: [
+                    { title: '任务5', content: '- 已完成的任务', completed: true, tags: [{ color: 'gray', text: '已完成' }], dueDate: '2023-11-30', subtasks: [] },
+                    { title: '任务6', content: '- 另一个已完成的任务\n- 包含多个子任务', completed: true, tags: [{ color: 'purple', text: '项目交付' }], dueDate: '2023-11-25', subtasks: [{ title: '需求分析', completed: true }, { title: '功能开发', completed: true }, { title: '测试验证', completed: true }, { title: '文档编写', completed: true }] }
+                ] }
+            ];
+
+            const $ = (sel, root = document) => root.querySelector(sel);
+            const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+            const colors = new Set(['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'gray']);
+            const defaultTagText = { red: '高优先级', orange: '中优先级', yellow: '低优先级', green: '绿色标签', blue: '蓝色标签', purple: '紫色标签', gray: '灰色标签' };
+            let data = loadData();
+            let currentColumn = -1;
+            let currentCardIndex = -1;
+            let currentCard = null;
+            let selectedColor = null;
+
+            function clone(value) { return JSON.parse(JSON.stringify(value)); }
+            function normalizeTag(tag = {}) {
+                const color = colors.has(tag.color) ? tag.color : 'gray';
+                return { color, text: String(tag.text ?? '').trim() || defaultTagText[color] };
+            }
+            function normalizeCard(card = {}) {
+                return {
+                    title: String(card.title ?? '未命名卡片').trim() || '未命名卡片',
+                    content: String(card.content ?? ''),
+                    completed: Boolean(card.completed),
+                    tags: Array.isArray(card.tags) ? card.tags.map(normalizeTag) : [],
+                    dueDate: typeof card.dueDate === 'string' && card.dueDate.trim() ? card.dueDate.trim() : null,
+                    subtasks: Array.isArray(card.subtasks) ? card.subtasks.map(item => ({ title: String(item.title ?? '未命名子任务').trim() || '未命名子任务', completed: Boolean(item.completed) })) : []
+                };
+            }
+            function normalizeKanban(value) {
+                if (!Array.isArray(value)) return null;
+                const normalized = value.filter(col => col && typeof col === 'object').map(col => ({
+                    title: String(col.title ?? '未命名列').trim() || '未命名列',
+                    cards: Array.isArray(col.cards) ? col.cards.map(normalizeCard) : []
+                }));
+                return normalized.length ? normalized : null;
+            }
+            function loadData() {
+                try {
+                    const stored = localStorage.getItem('kanbanData');
+                    return stored ? (normalizeKanban(JSON.parse(stored)) || clone(initialData)) : clone(initialData);
+                } catch (err) {
+                    console.warn('本地数据损坏，已使用默认数据。', err);
+                    return clone(initialData);
+                }
+            }
+            function saveData() {
+                try { localStorage.setItem('kanbanData', JSON.stringify(data)); }
+                catch (err) { console.error(err); showConfirmation('保存失败：浏览器本地存储空间不足或不可用', () => {}); }
+            }
+            function setCurrent(col, card) {
+                currentColumn = col;
+                currentCardIndex = card;
+                currentCard = data[col]?.cards?.[card] || null;
+            }
+
+            function escapeHtml(text) {
+                return String(text ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+            }
+            function md(text) {
+                if (!text || !String(text).trim()) return '<p></p>';
+                return escapeHtml(text)
+                    .replace(/^### (.+)$/gm, '<h5>$1</h5>')
+                    .replace(/^## (.+)$/gm, '<h4>$1</h4>')
+                    .replace(/^# (.+)$/gm, '<h3>$1</h3>')
+                    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+                    .replace(/(^|[^*])\*(?!\*)(.+?)\*(?!\*)/g, '$1<em>$2</em>')
+                    .replace(/`(.+?)`/g, '<code>$1</code>')
+                    .replace(/\n/g, '<br>');
+            }
+            function parseDate(value) {
+                if (!value) return null;
+                const date = new Date(`${value}T00:00:00`);
+                return Number.isNaN(date.getTime()) ? null : date;
+            }
+            function inputDate(date) {
+                return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+            }
+            function formatDate(value) {
+                const date = value instanceof Date ? value : parseDate(value);
+                return date ? date.toLocaleDateString('zh-CN', { year: 'numeric', month: 'short', day: 'numeric' }) : '无效日期';
+            }
+            function overdue(value) {
+                const date = parseDate(value);
+                if (!date) return false;
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                return date < today;
+            }
+            function validDateParts(year, month, day) {
+                if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return false;
+                if (year < 2000 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) return false;
+                const date = new Date(year, month - 1, day);
+                return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+            }
+            function b64Encode(text) {
+                const bytes = new TextEncoder().encode(text);
+                let binary = '';
+                bytes.forEach(byte => { binary += String.fromCharCode(byte); });
+                return btoa(binary);
+            }
+            function b64Decode(text) {
+                const binary = atob(text.trim());
+                return new TextDecoder().decode(Uint8Array.from(binary, char => char.charCodeAt(0)));
+            }
+
+            function renderKanban() {
+                const container = $('#kanban-container');
+                container.innerHTML = '';
+                data.forEach((column, colIndex) => {
+                    const col = document.createElement('div');
+                    col.className = 'column';
+                    col.dataset.columnIndex = colIndex;
+
+                    const header = document.createElement('div');
+                    header.className = 'column-header';
+                    const title = document.createElement('div');
+                    title.className = 'column-title';
+                    title.contentEditable = true;
+                    title.textContent = column.title;
+                    title.addEventListener('blur', () => {
+                        column.title = title.textContent.trim() || '未命名列';
+                        title.textContent = column.title;
+                        saveData();
+                    });
+                    const del = document.createElement('button');
+                    del.className = 'delete-column';
+                    del.innerHTML = '<i class="ri-delete-bin-line"></i>';
+                    del.title = '删除列';
+                    del.addEventListener('click', () => showConfirmation('确定要删除这一列吗？', () => {
+                        data.splice(colIndex, 1);
+                        saveData();
+                        renderKanban();
+                    }));
+                    header.append(title, del);
+                    col.appendChild(header);
+
+                    column.cards.forEach((card, cardIndex) => col.appendChild(renderCard(card, colIndex, cardIndex)));
+
+                    const addBtn = document.createElement('button');
+                    addBtn.className = 'add-card-btn';
+                    addBtn.innerHTML = '<i class="ri-add-line"></i> 添加卡片';
+                    const form = document.createElement('div');
+                    form.className = 'add-card-form';
+                    const titleInput = document.createElement('input');
+                    titleInput.className = 'card-title-input';
+                    titleInput.placeholder = '输入卡片标题...';
+                    const contentInput = document.createElement('textarea');
+                    contentInput.placeholder = '输入卡片内容（可选）...';
+                    const actions = document.createElement('div');
+                    actions.className = 'add-card-form-actions';
+                    const add = document.createElement('button');
+                    add.className = 'add-btn';
+                    add.textContent = '添加';
+                    add.addEventListener('click', () => {
+                        const cardTitle = titleInput.value.trim();
+                        if (!cardTitle) return;
+                        column.cards.push({ title: cardTitle, content: contentInput.value.trim(), completed: false, tags: [], dueDate: null, subtasks: [] });
+                        saveData();
+                        renderKanban();
+                    });
+                    const cancel = document.createElement('button');
+                    cancel.className = 'cancel-btn';
+                    cancel.textContent = '取消';
+                    cancel.addEventListener('click', () => { form.style.display = 'none'; addBtn.style.display = 'block'; });
+                    actions.append(add, cancel);
+                    form.append(titleInput, contentInput, actions);
+                    addBtn.addEventListener('click', () => { addBtn.style.display = 'none'; form.style.display = 'block'; titleInput.focus(); });
+                    col.append(addBtn, form);
+                    setupDrop(col, colIndex);
+                    container.appendChild(col);
+                });
+
+                const addColumn = document.createElement('div');
+                addColumn.className = 'add-column';
+                const btn = document.createElement('button');
+                btn.id = 'add-column-btn';
+                btn.innerHTML = '<i class="ri-add-line"></i> 添加列';
+                btn.addEventListener('click', async () => {
+                    const title = await showInputModal('请输入列标题', '');
+                    if (!title?.trim()) return;
+                    data.push({ title: title.trim(), cards: [] });
+                    saveData();
+                    renderKanban();
+                });
+                addColumn.appendChild(btn);
+                container.appendChild(addColumn);
+            }
+
+            function renderCard(card, colIndex, cardIndex) {
+                const el = document.createElement('div');
+                el.className = 'card';
+                if (card.completed) el.classList.add('completed');
+                el.draggable = true;
+                let dragged = false;
+
+                const check = document.createElement('label');
+                check.className = 'card-checkbox-label';
+                if (card.completed) check.classList.add('checked');
+                check.title = '切换完成状态';
+                check.addEventListener('click', ev => {
+                    ev.stopPropagation();
+                    card.completed = !card.completed;
+                    saveData();
+                    renderKanban();
+                });
+                el.appendChild(check);
+
+                if (card.tags?.length) {
+                    const tags = document.createElement('div');
+                    tags.className = 'tags-container';
+                    card.tags.forEach(tag => {
+                        const item = document.createElement('span');
+                        item.className = `tag tag-${tag.color}`;
+                        item.textContent = tag.text;
+                        tags.appendChild(item);
+                    });
+                    el.appendChild(tags);
+                }
+
+                if (card.dueDate) {
+                    const due = document.createElement('div');
+                    due.className = 'due-date';
+                    const parsed = parseDate(card.dueDate);
+                    if (!parsed) {
+                        due.classList.add('overdue');
+                        due.innerHTML = '<i class="ri-error-warning-line"></i> 到期时间无效';
+                    } else if (overdue(card.dueDate)) {
+                        due.classList.add('overdue');
+                        due.innerHTML = `<i class="ri-error-warning-line"></i> 已过期: ${formatDate(parsed)}`;
+                    } else {
+                        due.innerHTML = `<i class="ri-time-line"></i> 到期: ${formatDate(parsed)}`;
+                    }
+                    el.appendChild(due);
+                }
+
+                const header = document.createElement('div');
+                header.className = 'card-header';
+                const title = document.createElement('div');
+                title.className = 'card-title';
+                title.textContent = card.title;
+                const actions = document.createElement('div');
+                actions.className = 'card-actions';
+                const edit = document.createElement('button');
+                edit.innerHTML = '<i class="ri-edit-line"></i>';
+                edit.title = '编辑';
+                edit.addEventListener('click', ev => { ev.stopPropagation(); openCardDetail(colIndex, cardIndex); });
+                const del = document.createElement('button');
+                del.innerHTML = '<i class="ri-delete-bin-line"></i>';
+                del.title = '删除';
+                del.addEventListener('click', ev => {
+                    ev.stopPropagation();
+                    showConfirmation('确定要删除这张卡片吗？', () => {
+                        data[colIndex].cards.splice(cardIndex, 1);
+                        saveData();
+                        renderKanban();
+                    });
+                });
+                actions.append(edit, del);
+                header.append(title, actions);
+                el.appendChild(header);
+
+                const content = document.createElement('div');
+                content.className = 'card-content';
+                content.innerHTML = md(card.content);
+                el.appendChild(content);
+
+                if (card.subtasks?.length) {
+                    const done = card.subtasks.filter(s => s.completed).length;
+                    const status = document.createElement('div');
+                    status.className = 'subtask-status';
+                    status.innerHTML = `<i class="ri-task-line"></i> ${done}/${card.subtasks.length} 完成`;
+                    el.appendChild(status);
+                }
+
+                el.addEventListener('click', () => { if (!dragged) openCardDetail(colIndex, cardIndex); });
+                el.addEventListener('dragstart', ev => {
+                    dragged = true;
+                    ev.dataTransfer.effectAllowed = 'move';
+                    ev.dataTransfer.setData('text/plain', JSON.stringify({ colIndex, cardIndex }));
+                    setTimeout(() => el.classList.add('dragging'), 0);
+                });
+                el.addEventListener('dragend', () => {
+                    el.classList.remove('dragging');
+                    removeIndicators();
+                    $$('.column').forEach(column => column.classList.remove('dropzone'));
+                    setTimeout(() => { dragged = false; }, 0);
+                });
+                return el;
+            }
+
+            function indicator() {
+                const el = document.createElement('div');
+                el.className = 'drop-indicator';
+                return el;
+            }
+            function removeIndicators() { $$('.drop-indicator').forEach(el => el.remove()); }
+            function setupDrop(col, targetColIndex) {
+                col.addEventListener('dragover', ev => {
+                    ev.preventDefault();
+                    col.classList.add('dropzone');
+                    drawIndicator(col, ev.clientY);
+                });
+                col.addEventListener('dragleave', ev => {
+                    if (!col.contains(ev.relatedTarget)) {
+                        col.classList.remove('dropzone');
+                        removeIndicators();
+                    }
+                });
+                col.addEventListener('drop', ev => {
+                    ev.preventDefault();
+                    col.classList.remove('dropzone');
+                    let payload;
+                    try { payload = JSON.parse(ev.dataTransfer.getData('text/plain')); }
+                    catch { removeIndicators(); return; }
+                    const fromCol = Number(payload.colIndex);
+                    const fromCard = Number(payload.cardIndex);
+                    if (!Number.isInteger(fromCol) || !Number.isInteger(fromCard) || !data[fromCol]?.cards?.[fromCard]) {
+                        removeIndicators();
+                        return;
+                    }
+                    let targetIndex = targetIndexFromIndicator(col, targetColIndex);
+                    removeIndicators();
+                    const [card] = data[fromCol].cards.splice(fromCard, 1);
+                    if (fromCol === targetColIndex && fromCard < targetIndex) targetIndex -= 1;
+                    targetIndex = Math.max(0, Math.min(targetIndex, data[targetColIndex].cards.length));
+                    data[targetColIndex].cards.splice(targetIndex, 0, card);
+                    saveData();
+                    renderKanban();
+                });
+            }
+            function drawIndicator(col, y) {
+                removeIndicators();
+                const ind = indicator();
+                const cards = $$('.card:not(.dragging)', col);
+                const before = cards.find(card => {
+                    const rect = card.getBoundingClientRect();
+                    return y < rect.top + rect.height / 2;
+                });
+                if (before) before.before(ind);
+                else col.insertBefore(ind, $('.add-card-btn', col) || null);
+            }
+            function targetIndexFromIndicator(col, colIndex) {
+                const ind = $('.drop-indicator', col);
+                if (!ind) return data[colIndex].cards.length;
+                let count = 0;
+                for (const child of Array.from(col.children)) {
+                    if (child === ind) break;
+                    if (child.classList.contains('card')) count += 1;
+                }
+                return count;
+            }
+
+            function openCardDetail(col, card) {
+                if (!data[col]?.cards?.[card]) return;
+                setCurrent(col, card);
+                $('#card-detail-title').textContent = currentCard.title;
+                $('#card-detail-content').innerHTML = md(currentCard.content);
+                renderTags();
+                renderDue();
+                renderSubtasks();
+                $('#card-detail-view').style.display = 'block';
+                $('#edit-mode').style.display = 'none';
+                $('#modal-title').innerHTML = '<i class="ri-information-line"></i> 卡片详情';
+                $('#card-modal').style.display = 'flex';
+                $('#card-detail-title').onblur = () => {
+                    if (!currentCard) return;
+                    currentCard.title = $('#card-detail-title').textContent.trim() || '未命名卡片';
+                    $('#card-detail-title').textContent = currentCard.title;
+                    saveData();
+                    renderKanban();
+                };
+            }
+            function renderTags() {
+                const box = $('#tags-container');
+                box.innerHTML = '';
+                currentCard?.tags?.forEach((tag, index) => {
+                    const el = document.createElement('span');
+                    el.className = `tag tag-${tag.color}`;
+                    el.textContent = tag.text;
+                    el.title = '点击删除标签';
+                    el.addEventListener('click', () => {
+                        currentCard.tags.splice(index, 1);
+                        saveData();
+                        renderTags();
+                        renderKanban();
+                    });
+                    box.appendChild(el);
+                });
+            }
+            function renderDue() {
+                const box = $('#due-date-container');
+                box.innerHTML = '';
+                box.classList.remove('overdue');
+                if (!currentCard?.dueDate) return;
+                const parsed = parseDate(currentCard.dueDate);
+                if (!parsed) {
+                    box.classList.add('overdue');
+                    box.innerHTML = '<i class="ri-error-warning-line"></i> 到期时间无效';
+                } else if (overdue(currentCard.dueDate)) {
+                    box.classList.add('overdue');
+                    box.innerHTML = `<i class="ri-error-warning-line"></i> 已过期: ${formatDate(parsed)}`;
+                } else {
+                    box.innerHTML = `<i class="ri-time-line"></i> 到期: ${formatDate(parsed)}`;
+                }
+            }
+            function renderSubtasks() {
+                const list = $('#subtasks-list');
+                list.innerHTML = '';
+                const tasks = currentCard?.subtasks || [];
+                const done = tasks.filter(task => task.completed).length;
+                $('#subtask-progress').style.width = tasks.length ? `${(done / tasks.length) * 100}%` : '0%';
+                $('#subtask-progress-text').textContent = tasks.length ? `${done}/${tasks.length} 已完成` : '暂无子任务';
+                tasks.forEach((task, index) => {
+                    const item = document.createElement('div');
+                    item.className = 'subtask';
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.className = 'subtask-checkbox';
+                    checkbox.checked = task.completed;
+                    checkbox.id = `subtask-${currentColumn}-${currentCardIndex}-${index}`;
+                    const label = document.createElement('label');
+                    label.htmlFor = checkbox.id;
+                    label.className = 'subtask-checkbox-label';
+                    if (task.completed) label.classList.add('checked');
+                    label.addEventListener('click', ev => {
+                        ev.preventDefault();
+                        task.completed = !task.completed;
+                        saveData();
+                        renderSubtasks();
+                        renderKanban();
+                    });
+                    const text = document.createElement('div');
+                    text.className = 'subtask-content';
+                    text.textContent = task.title;
+                    const actions = document.createElement('div');
+                    actions.className = 'subtask-actions';
+                    const del = document.createElement('button');
+                    del.className = 'subtask-delete-btn';
+                    del.innerHTML = '<i class="ri-delete-bin-line"></i>';
+                    del.addEventListener('click', () => {
+                        currentCard.subtasks.splice(index, 1);
+                        saveData();
+                        renderSubtasks();
+                        renderKanban();
+                    });
+                    actions.appendChild(del);
+                    item.append(checkbox, label, text, actions);
+                    list.appendChild(item);
+                });
+            }
+
+            let inputResolve = null;
+            function showInputModal(title, value = '') {
+                return new Promise(resolve => {
+                    inputResolve = resolve;
+                    $('#input-modal-title').textContent = title;
+                    $('#input-modal-field').value = value;
+                    $('#input-modal').style.display = 'flex';
+                    $('#input-modal-field').focus();
+                });
+            }
+            function closeInput(value) {
+                if (inputResolve) inputResolve(value);
+                inputResolve = null;
+                $('#input-modal').style.display = 'none';
+            }
+            $('#input-modal-confirm').addEventListener('click', () => closeInput($('#input-modal-field').value));
+            $('#input-modal-cancel').addEventListener('click', () => closeInput(null));
+            $('#close-input-modal').addEventListener('click', () => closeInput(null));
+
+            let dateResolve = null;
+            let selectedDate = null;
+            function showDateModal(defaultDate = null) {
+                return new Promise(resolve => {
+                    dateResolve = resolve;
+                    const date = parseDate(defaultDate) || new Date();
+                    selectedDate = inputDate(date);
+                    $('#date-year').value = date.getFullYear();
+                    $('#date-month').value = date.getMonth() + 1;
+                    $('#date-day').value = date.getDate();
+                    renderCalendar(date.getFullYear(), date.getMonth());
+                    $('#date-modal').style.display = 'flex';
+                });
+            }
+            function closeDate(value) {
+                if (dateResolve) dateResolve(value);
+                dateResolve = null;
+                $('#date-modal').style.display = 'none';
+            }
+            function renderCalendar(year, monthIndex) {
+                const cal = $('#calendar');
+                cal.innerHTML = '';
+                ['日', '一', '二', '三', '四', '五', '六'].forEach(day => {
+                    const el = document.createElement('div');
+                    el.className = 'calendar-cell week-day';
+                    el.textContent = day;
+                    cal.appendChild(el);
+                });
+                const first = new Date(year, monthIndex, 1);
+                const last = new Date(year, monthIndex + 1, 0);
+                for (let i = 0; i < first.getDay(); i++) {
+                    const blank = document.createElement('div');
+                    blank.className = 'calendar-cell disabled';
+                    cal.appendChild(blank);
+                }
+                for (let day = 1; day <= last.getDate(); day++) {
+                    const el = document.createElement('div');
+                    el.className = 'calendar-cell';
+                    el.textContent = day;
+                    const value = inputDate(new Date(year, monthIndex, day));
+                    if (value === selectedDate) el.classList.add('selected');
+                    el.addEventListener('click', () => {
+                        selectedDate = value;
+                        $('#date-year').value = year;
+                        $('#date-month').value = monthIndex + 1;
+                        $('#date-day').value = day;
+                        renderCalendar(year, monthIndex);
+                    });
+                    cal.appendChild(el);
+                }
+            }
+            ['#date-year', '#date-month', '#date-day'].forEach(selector => $(selector).addEventListener('change', () => {
+                let year = parseInt($('#date-year').value, 10);
+                let month = parseInt($('#date-month').value, 10);
+                let day = parseInt($('#date-day').value, 10);
+                if (!Number.isInteger(year)) year = new Date().getFullYear();
+                if (!Number.isInteger(month)) month = new Date().getMonth() + 1;
+                month = Math.max(1, Math.min(12, month));
+                const maxDay = new Date(year, month, 0).getDate();
+                if (!Number.isInteger(day)) day = 1;
+                day = Math.max(1, Math.min(maxDay, day));
+                $('#date-year').value = year;
+                $('#date-month').value = month;
+                $('#date-day').value = day;
+                selectedDate = inputDate(new Date(year, month - 1, day));
+                renderCalendar(year, month - 1);
+            }));
+            $('#date-modal-confirm').addEventListener('click', () => {
+                const year = parseInt($('#date-year').value, 10);
+                const month = parseInt($('#date-month').value, 10);
+                const day = parseInt($('#date-day').value, 10);
+                if (validDateParts(year, month, day)) closeDate(inputDate(new Date(year, month - 1, day)));
+                else showConfirmation('请选择有效日期', () => {});
+            });
+            $('#date-modal-cancel').addEventListener('click', () => closeDate(null));
+            $('#close-date-modal').addEventListener('click', () => closeDate(null));
+
+            $('#add-tag-btn').addEventListener('click', () => {
+                if (!currentCard) return;
+                selectedColor = null;
+                $$('.tag-color-option').forEach(el => el.classList.remove('selected'));
+                $('#tag-text').value = '';
+                $('#tag-modal').style.display = 'flex';
+            });
+            $$('.tag-color-option').forEach(el => el.addEventListener('click', () => {
+                selectedColor = el.dataset.color;
+                $$('.tag-color-option').forEach(option => option.classList.remove('selected'));
+                el.classList.add('selected');
+            }));
+            $('#confirm-tag').addEventListener('click', () => {
+                if (!currentCard || !selectedColor) return;
+                currentCard.tags.push(normalizeTag({ color: selectedColor, text: $('#tag-text').value.trim() || defaultTagText[selectedColor] }));
+                saveData();
+                renderTags();
+                renderKanban();
+                $('#tag-modal').style.display = 'none';
+            });
+            $('#cancel-tag').addEventListener('click', () => { $('#tag-modal').style.display = 'none'; });
+            $('#close-tag-modal').addEventListener('click', () => { $('#tag-modal').style.display = 'none'; });
+
+            $('#set-due-date-btn').addEventListener('click', async () => {
+                if (!currentCard) return;
+                const value = await showDateModal(currentCard.dueDate);
+                if (!value) return;
+                currentCard.dueDate = value;
+                saveData();
+                renderDue();
+                renderKanban();
+            });
+            $('#add-subtask-btn').addEventListener('click', async () => {
+                if (!currentCard) return;
+                const title = await showInputModal('输入子任务标题', '');
+                if (!title?.trim()) return;
+                currentCard.subtasks.push({ title: title.trim(), completed: false });
+                saveData();
+                renderSubtasks();
+                renderKanban();
+            });
+            $('#edit-card-btn').addEventListener('click', () => {
+                if (!currentCard) return;
+                $('#card-detail-view').style.display = 'none';
+                $('#edit-mode').style.display = 'block';
+                $('#modal-title').innerHTML = '<i class="ri-edit-line"></i> 编辑卡片';
+                $('#card-content-text').value = currentCard.content;
+                updateMarkdownPreview();
+            });
+            $('#save-edit').addEventListener('click', () => {
+                if (!currentCard) return;
+                currentCard.content = $('#card-content-text').value.trim();
+                saveData();
+                renderKanban();
+                $('#card-modal').style.display = 'none';
+            });
+            $('#cancel-edit').addEventListener('click', () => {
+                $('#edit-mode').style.display = 'none';
+                $('#card-detail-view').style.display = 'block';
+                $('#modal-title').innerHTML = '<i class="ri-information-line"></i> 卡片详情';
+            });
+            function updateMarkdownPreview() { $('#markdown-preview').innerHTML = md($('#card-content-text').value); }
+            $('#card-content-text').addEventListener('input', updateMarkdownPreview);
+            $$('.format-btn').forEach(button => button.addEventListener('click', () => {
+                const textarea = $('#card-content-text');
+                const prefix = button.dataset.prefix || '';
+                const suffix = button.dataset.suffix || '';
+                const start = textarea.selectionStart;
+                const end = textarea.selectionEnd;
+                const selected = textarea.value.substring(start, end);
+                textarea.value = textarea.value.substring(0, start) + prefix + selected + suffix + textarea.value.substring(end);
+                const cursor = start + prefix.length + selected.length + suffix.length;
+                textarea.setSelectionRange(cursor, cursor);
+                textarea.focus();
+                updateMarkdownPreview();
+            }));
+            $('#card-modal').querySelector('.close').addEventListener('click', () => { $('#card-modal').style.display = 'none'; });
+            $('#card-modal').addEventListener('click', ev => { if (ev.target === $('#card-modal')) $('#card-modal').style.display = 'none'; });
+
+            function showConfirmation(message, confirmCallback) {
+                $('#confirmation-message').textContent = message;
+                $('#confirmation-modal').style.display = 'flex';
+                $('#confirmation-confirm').onclick = () => {
+                    $('#confirmation-modal').style.display = 'none';
+                    if (typeof confirmCallback === 'function') confirmCallback();
+                };
+                $('#confirmation-cancel').onclick = () => { $('#confirmation-modal').style.display = 'none'; };
+            }
+
+            function updateThemeIcon() {
+                $('#theme-switch').innerHTML = document.body.classList.contains('dark-mode') ? '<i class="ri-sun-line"></i>' : '<i class="ri-moon-line"></i>';
+            }
+            const savedTheme = localStorage.getItem('theme');
+            const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+            if (savedTheme === 'dark' || (!savedTheme && prefersDark)) document.body.classList.add('dark-mode');
+            updateThemeIcon();
+            $('#theme-switch').addEventListener('click', () => {
+                document.body.classList.toggle('dark-mode');
+                localStorage.setItem('theme', document.body.classList.contains('dark-mode') ? 'dark' : 'light');
+                updateThemeIcon();
+            });
+
+            function generateMarkdown() {
+                let out = '';
+                data.forEach(col => {
+                    out += `# ${col.title}\n\n`;
+                    col.cards.forEach(card => {
+                        out += `## ${card.completed ? '[x]' : '[ ]'} ${card.title}\n\n`;
+                        if (card.content) out += `${card.content}\n\n`;
+                        if (card.tags?.length) out += `标签: ${card.tags.map(tag => `${tag.color}:${tag.text}`).join(', ')}\n\n`;
+                        if (card.dueDate) out += `到期时间: ${card.dueDate}\n\n`;
+                        if (card.subtasks?.length) {
+                            out += '### 子任务\n\n';
+                            card.subtasks.forEach(task => { out += `- ${task.completed ? '[x]' : '[ ]'} ${task.title}\n`; });
+                            out += '\n';
+                        }
+                        out += '---\n\n';
+                    });
+                });
+                out += '<!-- KANBAN_DATA_START -->\n';
+                out += b64Encode(JSON.stringify({ version: '2.0', exportDate: new Date().toISOString(), kanbanData: data }));
+                out += '\n<!-- KANBAN_DATA_END -->\n';
+                return out;
+            }
+            $('#save-file').addEventListener('click', () => {
+                const blob = new Blob([generateMarkdown()], { type: 'text/markdown;charset=utf-8' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = 'markdown-kanban.md';
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                URL.revokeObjectURL(url);
+            });
+            $('#load-file').addEventListener('click', () => $('#file-input').click());
+            $('#file-input').addEventListener('change', ev => {
+                const file = ev.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = event => showConfirmation('加载文件将覆盖当前看板，确定要继续吗？', () => {
+                    try {
+                        const ok = parseMarkdownFile(event.target.result);
+                        showConfirmation(ok ? '数据加载成功！' : '无法从文件中解析出有效的看板数据', () => {});
+                    } catch (err) {
+                        console.error(err);
+                        showConfirmation('导入失败：文件格式错误', () => {});
+                    }
+                });
+                reader.onerror = () => showConfirmation('导入失败：无法读取文件', () => {});
+                reader.readAsText(file);
+                ev.target.value = '';
+            });
+            function readEmbedded(content) {
+                const match = content.match(/<!-- KANBAN_DATA_START -->\s*([\s\S]*?)\s*<!-- KANBAN_DATA_END -->/);
+                if (match) return normalizeKanban(JSON.parse(b64Decode(match[1])).kanbanData);
+                const legacy = content.match(/<!-- CUSTOM_DATA_START -->\s*([\s\S]*?)\s*<!-- CUSTOM_DATA_END -->/);
+                if (legacy) {
+                    try { return normalizeKanban(JSON.parse(legacy[1]).kanbanData); }
+                    catch { return null; }
+                }
+                return null;
+            }
+            function parseMarkdownBody(content) {
+                content = content.replace(/<!-- KANBAN_DATA_START -->[\s\S]*?<!-- KANBAN_DATA_END -->/g, '').replace(/<!-- CUSTOM_DATA_START -->[\s\S]*?<!-- CUSTOM_DATA_END -->/g, '');
+                const result = [];
+                let col = null, card = null, subtasks = false;
+                content.split(/\r?\n/).forEach(raw => {
+                    const line = raw.trimEnd();
+                    if (line.trim() === '---') { card = null; subtasks = false; return; }
+                    if (line.startsWith('# ') && !line.startsWith('## ')) { col = { title: line.slice(2).trim() || '未命名列', cards: [] }; result.push(col); card = null; subtasks = false; return; }
+                    if (line.startsWith('## ')) {
+                        if (!col) { col = { title: '未命名列', cards: [] }; result.push(col); }
+                        let title = line.slice(3).trim();
+                        let completed = false;
+                        if (/^\[(x|X| )\]\s+/.test(title)) { completed = /^\[(x|X)\]\s+/.test(title); title = title.replace(/^\[(x|X| )\]\s+/, '').trim(); }
+                        card = { title: title || '未命名卡片', content: '', completed, tags: [], dueDate: null, subtasks: [] };
+                        col.cards.push(card); subtasks = false; return;
+                    }
+                    if (!card) return;
+                    if (line === '### 子任务') { subtasks = true; return; }
+                    if (subtasks && /^- \[(x|X| )\]\s+/.test(line)) { card.subtasks.push({ completed: /^- \[(x|X)\]\s+/.test(line), title: line.replace(/^- \[(x|X| )\]\s+/, '').trim() || '未命名子任务' }); return; }
+                    if (!subtasks && line.startsWith('标签:')) {
+                        const tags = line.slice(3).trim();
+                        card.tags = tags ? tags.split(',').map(rawTag => {
+                            const value = rawTag.trim();
+                            const idx = value.indexOf(':');
+                            return idx > 0 ? normalizeTag({ color: value.slice(0, idx).trim(), text: value.slice(idx + 1).trim() }) : normalizeTag({ color: 'gray', text: value });
+                        }) : [];
+                        return;
+                    }
+                    if (!subtasks && line.startsWith('到期时间:')) { card.dueDate = line.slice(5).trim() || null; return; }
+                    if (!subtasks) card.content += card.content ? `\n${line}` : line;
+                });
+                return normalizeKanban(result);
+            }
+            function parseMarkdownFile(content) {
+                const parsed = readEmbedded(content) || parseMarkdownBody(content);
+                if (!parsed) return false;
+                data = parsed;
+                saveData();
+                renderKanban();
+                return true;
+            }
+
+            renderKanban();
+        });
+    </script>
+</body>
+</html>
