@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Media Speed Tuner
 // @namespace    https://github.com/Kanadeforever
-// @version      1.0.1
-// @description  全局视频/音频倍速控制，支持可配置快捷键、OSD 屏幕提示、跨页面速度共享
+// @version      1.0.2
+// @description  全局视频/音频倍速控制，支持可配置快捷键、OSD 屏幕提示、跨页面速度共享/重置
 // @author       Luminous
 // @match        *://*/*
 // @grant        GM_getValue
@@ -26,6 +26,7 @@
         osdDuration: 900,
         osdBgColor: 'rgba(0,0,0,0.82)',
         osdTextColor: '#ffffff',
+        resetSpeedOnPageLoad: false, // 跨页是否重置到默认 1.0x
         keySpeedUp:   { code: 'Equal',     ctrlKey: false, altKey: true, shiftKey: false, metaKey: false },
         keySpeedDown: { code: 'Minus',     ctrlKey: false, altKey: true, shiftKey: false, metaKey: false },
         keyReset:     { code: 'Backspace', ctrlKey: false, altKey: true, shiftKey: false, metaKey: false },
@@ -65,9 +66,16 @@
     // ═══════════════════════════════════════════
     var _storedSpeed = GM_getValue('_speed');
     var _storedLast = GM_getValue('_lastSpeed');
-    var currentSpeed = (typeof _storedSpeed === 'number') ? _storedSpeed : DEFAULT_SPEED;
+    var resetSpeedOnPageLoad = !!CFG.resetSpeedOnPageLoad;
+    var currentSpeed = resetSpeedOnPageLoad ? DEFAULT_SPEED :
+        ((typeof _storedSpeed === 'number') ? _storedSpeed : DEFAULT_SPEED);
     var lastSpeed = (typeof _storedLast === 'number') ? _storedLast : DEFAULT_SPEED;
     var mediaSet = new WeakSet();
+
+    // 开启后，每次进入/刷新页面都从默认速度开始；关闭则保持原来的跨页共享速度
+    if (resetSpeedOnPageLoad) {
+        GM_setValue('_speed', DEFAULT_SPEED);
+    }
 
     // ═══════════════════════════════════════════
     // 工具函数
@@ -396,6 +404,8 @@
             'border:1px solid #444;font-size:13px;}' +
             '.gs-row input[type=color]{width:28px;height:28px;border:none;border-radius:4px;' +
             'background:transparent;cursor:pointer;}' +
+            '.gs-row input[type=checkbox]{width:16px;height:16px;accent-color:#4a9eff;cursor:pointer;}' +
+            '.gs-hint{font-size:12px;color:#777;margin:-6px 0 12px;line-height:1.4;}' +
             '.gs-key{display:inline-block;padding:3px 10px;background:#2a2a2a;border:1px solid #444;' +
             'border-radius:4px;font-size:13px;cursor:pointer;min-width:90px;text-align:center;' +
             'color:#4ac;font-family:monospace;user-select:none;}' +
@@ -603,6 +613,17 @@
             '<span class="gs-val" id="gs-val-speedStep">' + cfg.speedStep.toFixed(2) + '</span>' +
             '</div>' +
 
+            // ── 跨页面 ──
+            '<div class="gs-section">跨页面</div>' +
+
+            '<div class="gs-row">' +
+            '<label>跨页重置</label>' +
+            '<input type="checkbox" id="gs-cfg-resetSpeedOnPageLoad"' +
+            (cfg.resetSpeedOnPageLoad ? ' checked' : '') + '>' +
+            '</div>' +
+
+            '<div class="gs-hint">关闭：新页面沿用上次速度；开启：每次进入/刷新页面都从 1.0x 开始。</div>' +
+
             // ── 按钮 ──
             '<div class="gs-btns">' +
             '<button class="gs-btn-reset" id="gs-btn-reset">恢复默认</button>' +
@@ -640,6 +661,7 @@
                 osdPosition: backdrop.querySelector('#gs-cfg-osdPosition').value,
                 osdDuration: parseInt(backdrop.querySelector('#gs-cfg-osdDuration').value),
                 speedStep: parseFloat(backdrop.querySelector('#gs-cfg-speedStep').value),
+                resetSpeedOnPageLoad: backdrop.querySelector('#gs-cfg-resetSpeedOnPageLoad').checked,
                 osdBgColor: 'rgba(' +
                     parseInt(backdrop.querySelector('#gs-cfg-osdBgColor').value.slice(1,3), 16) + ',' +
                     parseInt(backdrop.querySelector('#gs-cfg-osdBgColor').value.slice(3,5), 16) + ',' +
@@ -656,6 +678,9 @@
                 keyToggle:    _editCfg.keyToggle,
             };
             saveConfig(CFG);
+            if (CFG.resetSpeedOnPageLoad) {
+                GM_setValue('_speed', DEFAULT_SPEED);
+            }
             rebuildOSD();
             closeSettings();
             showOSD('设置已保存');
