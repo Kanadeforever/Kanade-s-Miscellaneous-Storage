@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WNACG 目录类别筛选器
 // @namespace    local.wnacg.category-filter
-// @version      1.0.1
+// @version      1.0.2
 // @description  在 WNACG 目录页按图片右上角伪元素类别筛选作品
 // @match        *://www.wnacg.com/albums-index*.html*
 // @match        *://wnacg.com/albums-index*.html*
@@ -522,7 +522,7 @@
     if (panel) keepPanelInsideViewport(panel);
   }
 
-  function scheduleAutoScan(select, delay = 1000) {
+  function scheduleAutoScan(select, delay = 500) {
     clearTimeout(autoScanTimer);
 
     autoScanTimer = setTimeout(() => {
