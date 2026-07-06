@@ -522,7 +522,7 @@
     if (panel) keepPanelInsideViewport(panel);
   }
 
-  function scheduleAutoScan(select, delay = 300) {
+  function scheduleAutoScan(select, delay = 1000) {
     clearTimeout(autoScanTimer);
 
     autoScanTimer = setTimeout(() => {
