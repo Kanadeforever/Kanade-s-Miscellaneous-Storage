@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WNACG 目录类别筛选器
 // @namespace    local.wnacg.category-filter
-// @version      1.0.2
+// @version      1.1.0
 // @description  在 WNACG 目录页按图片右上角伪元素类别筛选作品
 // @match        *://www.wnacg.com/albums-index*.html*
 // @match        *://wnacg.com/albums-index*.html*
@@ -15,6 +15,12 @@
 // @match        *://www.wn07.shop/albums.html*
 // @match        *://www.wn06.cfd/albums.html*
 // @match        *://www.wn06.shop/albums.html*
+// @match        *://www.wnacg.com/search/?q=*
+// @match        *://wnacg.com/search/?q=*
+// @match        *://www.wn07.cfd/search/?q=*
+// @match        *://www.wn07.shop/search/?q=*
+// @match        *://www.wn06.cfd/search/?q=*
+// @match        *://www.wn06.shop/search/?q=*
 // @grant        none
 // @downloadURL  https://github.com/Kanadeforever/Kanade-s-Miscellaneous-Storage/raw/main/Browser%20Scripts/wnacg-category-filter.user.js
 // @updateURL    https://github.com/Kanadeforever/Kanade-s-Miscellaneous-Storage/raw/main/Browser%20Scripts/wnacg-category-filter.user.js
