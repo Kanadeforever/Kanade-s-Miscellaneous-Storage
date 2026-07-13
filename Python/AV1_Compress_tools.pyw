@@ -11,7 +11,7 @@ AV1 压制工具
 - 保留字幕、章节、元数据与 Matroska 附件
 - 当前文件进度、总体加权进度、速度和预计剩余时间
 - 启动检查、安全临时输出、完成验证、可疑文件完整解码验证
-- 队列状态恢复、无压缩收益持久记录、同目录滚动日志
+- 队列状态恢复、无压缩收益持久记录、快速内容指纹、同目录滚动日志
 - 成功且体积变小时可将原文件移入“_待删除原文件”
 - 首次运行自动生成同名 JSON 配置模板
 
@@ -20,6 +20,7 @@ AV1 压制工具
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -55,6 +56,9 @@ STATE_PATH = SCRIPT_DIR / f"{APP_STEM}.state.json"
 
 STATE_SCHEMA_VERSION = 2
 ENCODING_POLICY_VERSION = "av1-svt-p5-pixel-crf-opus-128-192-v2-old-output-scan"
+QUICK_FINGERPRINT_VERSION = "sha256-sparse-v1"
+QUICK_FINGERPRINT_CHUNK_SIZE = 256 * 1024
+QUICK_FINGERPRINT_SAMPLE_COUNT = 5
 PENDING_DELETE_DIRNAME = "_待删除原文件"
 
 CONFIG_TEMPLATE = {
@@ -83,8 +87,14 @@ TEXT_SUBTITLE_TO_SRT = {"mov_text", "text", "tx3g", "webvtt"}
 
 INVALID_SUFFIX_CHARS = re.compile(r'[<>:"/\\|?*]')
 ERROR_WORDS = re.compile(
-    r"\b(error|invalid|corrupt|failed|non[- ]monotonous|decode_slice_header)\b",
+    r"\b(error|invalid|corrupt|failed|non[- ]monoton(?:ous|ically)|decode_slice_header)\b",
     re.IGNORECASE,
+)
+BENIGN_TIMESTAMP_PATTERNS = (
+    re.compile(r"application provided invalid,?\s*non[- ]monotonically increasing dts to muxer", re.IGNORECASE),
+    re.compile(r"non[- ]monoton(?:ous|ically).*dts", re.IGNORECASE),
+    re.compile(r"timestamps are unset in a packet", re.IGNORECASE),
+    re.compile(r"invalid dts.*pts", re.IGNORECASE),
 )
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -142,6 +152,8 @@ class Task:
     cover_indexes: list[int] = field(default_factory=list)
     input_size: int = 0
     input_mtime_ns: int = 0
+    source_fingerprint: str = ""
+    fingerprint_version: str = QUICK_FINGERPRINT_VERSION
     weight: float = 0.0
     status: str = "等待"
     message: str = ""
@@ -158,6 +170,50 @@ def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     temp = path.with_name(path.name + ".tmp")
     temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temp, path)
+
+
+def quick_content_fingerprint(path: Path, size: Optional[int] = None) -> str:
+    """
+    计算快速内容指纹。
+
+    指纹包含文件字节数，并抽样读取开头、1/4、1/2、3/4、结尾附近的数据块。
+    大文件通常只读取约 1.25 MiB；小文件会自动去重重叠采样位置。
+    这不是完整文件哈希，但足以显著降低仅凭路径、大小和修改时间造成的误匹配。
+    """
+    file_size = path.stat().st_size if size is None else int(size)
+    if file_size < 0:
+        raise ValueError("文件大小无效")
+
+    hasher = hashlib.sha256()
+    hasher.update(QUICK_FINGERPRINT_VERSION.encode("ascii"))
+    hasher.update(b"\0")
+    hasher.update(file_size.to_bytes(16, "big", signed=False))
+
+    if file_size == 0:
+        return hasher.hexdigest()
+
+    chunk_size = min(QUICK_FINGERPRINT_CHUNK_SIZE, file_size)
+    max_offset = max(file_size - chunk_size, 0)
+    if QUICK_FINGERPRINT_SAMPLE_COUNT <= 1 or max_offset == 0:
+        offsets = [0]
+    else:
+        offsets = sorted({
+            (max_offset * index) // (QUICK_FINGERPRINT_SAMPLE_COUNT - 1)
+            for index in range(QUICK_FINGERPRINT_SAMPLE_COUNT)
+        })
+
+    with path.open("rb") as handle:
+        for offset in offsets:
+            handle.seek(offset)
+            block = handle.read(chunk_size)
+            hasher.update(offset.to_bytes(16, "big", signed=False))
+            hasher.update(len(block).to_bytes(8, "big", signed=False))
+            hasher.update(block)
+    return hasher.hexdigest()
+
+
+def is_benign_timestamp_message(line: str) -> bool:
+    return any(pattern.search(line) for pattern in BENIGN_TIMESTAMP_PATTERNS)
 
 
 def generate_config_template() -> None:
@@ -456,6 +512,9 @@ class AV1CompressorApp:
         self.current_state_context: Optional[tuple[list[InputSource], Path, str, bool, bool]] = None
         self.existing_output_files: list[Path] = []
         self.existing_output_name_index: dict[str, list[Path]] = {}
+        self.existing_output_probe_cache: dict[str, dict[str, Any]] = {}
+        self.existing_output_fingerprint_index: dict[str, list[Path]] = {}
+        self.existing_output_fingerprint_index_built = False
         self.claimed_existing_outputs: set[str] = set()
         self.source_stem_counts: dict[str, int] = {}
 
@@ -556,15 +615,17 @@ class AV1CompressorApp:
         self.task_tree.heading("quality", text="视频参数")
         self.task_tree.heading("audio", text="音频")
         self.task_tree.heading("status", text="状态")
-        self.task_tree.column("#0", width=330, minwidth=180)
-        self.task_tree.column("resolution", width=105, anchor=tk.CENTER)
-        self.task_tree.column("quality", width=115, anchor=tk.CENTER)
-        self.task_tree.column("audio", width=160, anchor=tk.CENTER)
-        self.task_tree.column("status", width=150, anchor=tk.CENTER)
+        self.task_tree.column("#0", width=330, minwidth=180, stretch=False)
+        self.task_tree.column("resolution", width=105, anchor=tk.CENTER, stretch=False)
+        self.task_tree.column("quality", width=115, anchor=tk.CENTER, stretch=False)
+        self.task_tree.column("audio", width=160, anchor=tk.CENTER, stretch=False)
+        self.task_tree.column("status", width=520, minwidth=220, anchor=tk.W, stretch=False)
         self.task_tree.grid(row=0, column=0, sticky="nsew")
         tree_scroll = ttk.Scrollbar(task_frame, orient=tk.VERTICAL, command=self.task_tree.yview)
         tree_scroll.grid(row=0, column=1, sticky="ns")
-        self.task_tree.configure(yscrollcommand=tree_scroll.set)
+        tree_xscroll = ttk.Scrollbar(task_frame, orient=tk.HORIZONTAL, command=self.task_tree.xview)
+        tree_xscroll.grid(row=1, column=0, sticky="ew")
+        self.task_tree.configure(yscrollcommand=tree_scroll.set, xscrollcommand=tree_xscroll.set)
 
         progress_frame = ttk.LabelFrame(main, text="进度", padding=8)
         progress_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
@@ -912,6 +973,9 @@ class AV1CompressorApp:
         reserved_outputs: set[str] = set()
         self.existing_output_files = self._index_existing_outputs(output_dir)
         self.existing_output_name_index = self._build_existing_output_name_index(self.existing_output_files)
+        self.existing_output_probe_cache.clear()
+        self.existing_output_fingerprint_index.clear()
+        self.existing_output_fingerprint_index_built = False
         self.claimed_existing_outputs.clear()
         if self.existing_output_files:
             self.log(f"输出目录中发现 {len(self.existing_output_files)} 个可供旧成品验证的 MKV。")
@@ -1116,6 +1180,11 @@ class AV1CompressorApp:
             self.log(f"输出名与源文件相同，自动改为：{base_final_path.name}", logging.WARNING)
 
         stat = path.stat()
+        source_fingerprint = quick_content_fingerprint(path, stat.st_size)
+        self.log(
+            f"快速内容指纹：{path.name} -> {source_fingerprint[:16]}… ({QUICK_FINGERPRINT_VERSION})",
+            gui=False,
+        )
         fps_factor = max(1.0, fps / 30.0) ** 0.5 if fps > 0 else 1.0
         weight = duration * max(pixels, 1) * fps_factor
 
@@ -1155,6 +1224,8 @@ class AV1CompressorApp:
             cover_indexes=[parse_int(s.get("index")) for s in attached_pictures],
             input_size=stat.st_size,
             input_mtime_ns=stat.st_mtime_ns,
+            source_fingerprint=source_fingerprint,
+            fingerprint_version=QUICK_FINGERPRINT_VERSION,
             weight=weight,
         )
 
@@ -1314,6 +1385,7 @@ class AV1CompressorApp:
         suspicious = any(
             ERROR_WORDS.search(line)
             and "failed to set thread priority" not in line.lower()
+            and not is_benign_timestamp_message(line)
             for line in stderr_lines
         )
         valid, details = self._validate_output(task, temp_path, suspicious)
@@ -1434,6 +1506,8 @@ class AV1CompressorApp:
             "-metadata", f"AV1TOOL_SOURCE_SIZE={task.input_size}",
             "-metadata", f"AV1TOOL_SOURCE_MTIME_NS={task.input_mtime_ns}",
             "-metadata", f"AV1TOOL_SOURCE_RELATIVE={task.source_relative}",
+            "-metadata", f"AV1TOOL_SOURCE_FINGERPRINT={task.source_fingerprint}",
+            "-metadata", f"AV1TOOL_FINGERPRINT_VERSION={task.fingerprint_version}",
             "-metadata", f"AV1TOOL_POLICY_VERSION={ENCODING_POLICY_VERSION}",
             "-max_muxing_queue_size", "4096",
             "-f", "matroska",
@@ -1470,9 +1544,24 @@ class AV1CompressorApp:
         separators = ("_", "-", " ", ".", "(", "（", "[", "【", "{", "〔")
         return any(candidate_stem.startswith(source_stem + sep) for sep in separators)
 
-    def _source_metadata_match(self, task: Task, probe: dict[str, Any]) -> Optional[bool]:
+    def _format_tags(self, probe: dict[str, Any]) -> dict[str, str]:
         raw_tags = ((probe.get("format") or {}).get("tags") or {})
-        tags = {str(key).casefold(): str(value) for key, value in raw_tags.items()}
+        return {str(key).casefold(): str(value) for key, value in raw_tags.items()}
+
+    def _source_metadata_match(self, task: Task, probe: dict[str, Any]) -> Optional[bool]:
+        tags = self._format_tags(probe)
+        tagged_fingerprint = tags.get("av1tool_source_fingerprint", "").strip().lower()
+        tagged_fingerprint_version = tags.get("av1tool_fingerprint_version", "").strip()
+
+        # 新版快速内容指纹优先。指纹包含文件大小与多点内容采样，
+        # 因此源文件改名、移动或仅修改文件时间后仍可识别。
+        if tagged_fingerprint:
+            if tagged_fingerprint_version and tagged_fingerprint_version != task.fingerprint_version:
+                return False
+            return tagged_fingerprint == task.source_fingerprint.lower()
+
+        # 当前版本升级前生成的文件没有快速指纹，仍沿用原有来源标记，
+        # 以保证正在进行的任务与已有成品不会因升级而全部重做。
         marker_keys = {
             "av1tool_source_size",
             "av1tool_source_mtime_ns",
@@ -1495,23 +1584,72 @@ class AV1CompressorApp:
                 return False
         return True
 
+    def _probe_existing_cached(self, path: Path) -> dict[str, Any]:
+        key = self._existing_output_key(path)
+        cached = self.existing_output_probe_cache.get(key)
+        if cached is not None:
+            return cached
+        probe = self._probe(path)
+        self.existing_output_probe_cache[key] = probe
+        return probe
+
+    def _ensure_existing_output_fingerprint_index(self) -> None:
+        if self.existing_output_fingerprint_index_built:
+            return
+        self.existing_output_fingerprint_index_built = True
+        if not self.existing_output_files:
+            return
+
+        self.log("正在建立旧成品快速指纹索引，用于识别改名或移动过的成品。")
+        total = len(self.existing_output_files)
+        for index, candidate in enumerate(self.existing_output_files, start=1):
+            if self.stop_event.is_set():
+                raise InterruptedError
+            try:
+                probe = self._probe_existing_cached(candidate)
+            except Exception as exc:
+                self.log(f"旧成品指纹索引无法读取，忽略：{candidate}：{exc}", logging.WARNING, gui=False)
+                continue
+            tags = self._format_tags(probe)
+            fingerprint = tags.get("av1tool_source_fingerprint", "").strip().lower()
+            version = tags.get("av1tool_fingerprint_version", "").strip()
+            if fingerprint and (not version or version == QUICK_FINGERPRINT_VERSION):
+                self.existing_output_fingerprint_index.setdefault(fingerprint, []).append(candidate)
+            if index % 25 == 0 or index == total:
+                self.ui_queue.put(("current_text", f"建立旧成品指纹索引：{index}/{total}"))
+
     def _find_reusable_old_output(self, task: Task, expected_path: Path) -> Optional[Path]:
         """
         在编码前查找旧成品。
 
-        有本工具来源标记的文件可跨目录匹配；没有标记的旧版文件只依赖
-        文件名、媒体结构和唯一性，避免把同名但无关的视频误认成成品。
+        优先使用快速内容指纹。带指纹的新成品即使改名或移动，仍可识别；
+        无指纹的现有成品继续使用文件名、原来源标记、媒体结构和唯一性判断。
         """
         expected_parent = expected_path.parent.resolve(strict=False)
         input_resolved = Path(task.input_path).resolve(strict=False)
         evaluated: list[tuple[Path, int, str]] = []
+        seen_candidates: set[str] = set()
 
         source_key = Path(task.input_path).stem.casefold()
-        for candidate in self.existing_output_name_index.get(source_key, []):
+        candidate_pool = list(self.existing_output_name_index.get(source_key, []))
+
+        # 只有文件名候选中没有高可信匹配时，才建立全目录指纹索引。
+        # 索引只读取 MKV 元数据，不解码视频，并在本次扫描中缓存。
+        if task.source_fingerprint:
+            self._ensure_existing_output_fingerprint_index()
+            candidate_pool.extend(
+                self.existing_output_fingerprint_index.get(task.source_fingerprint.lower(), [])
+            )
+
+        for candidate in candidate_pool:
             try:
                 candidate_resolved = candidate.resolve(strict=False)
             except OSError:
                 continue
+            candidate_key = self._existing_output_key(candidate_resolved)
+            if candidate_key in seen_candidates:
+                continue
+            seen_candidates.add(candidate_key)
             if candidate_resolved == expected_path.resolve(strict=False):
                 continue
             if candidate_resolved == input_resolved:
@@ -1520,13 +1658,19 @@ class AV1CompressorApp:
                 continue
             if not candidate_resolved.exists():
                 continue
-            if not self._legacy_name_matches_source(task, candidate_resolved):
-                continue
 
             try:
-                probe = self._probe(candidate_resolved)
+                probe = self._probe_existing_cached(candidate_resolved)
             except Exception as exc:
                 self.log(f"旧成品候选无法读取，忽略：{candidate_resolved}：{exc}", logging.WARNING, gui=False)
+                continue
+
+            metadata_match = self._source_metadata_match(task, probe)
+            name_match = self._legacy_name_matches_source(task, candidate_resolved)
+            if metadata_match is False:
+                self.log(f"旧成品候选的来源指纹或来源标记不匹配，忽略：{candidate_resolved}", gui=False)
+                continue
+            if metadata_match is None and not name_match:
                 continue
 
             valid, details = self._validate_output(
@@ -1540,18 +1684,18 @@ class AV1CompressorApp:
                 self.log(f"旧成品候选验证未通过，忽略：{candidate_resolved}：{details}", gui=False)
                 continue
 
-            metadata_match = self._source_metadata_match(task, probe)
-            if metadata_match is False:
-                self.log(f"旧成品候选的来源标记不匹配，忽略：{candidate_resolved}", gui=False)
-                continue
-
             same_parent = candidate_resolved.parent.resolve(strict=False) == expected_parent
-            if metadata_match is True:
+            tags = self._format_tags(probe)
+            has_quick_fingerprint = bool(tags.get("av1tool_source_fingerprint", "").strip())
+            if metadata_match is True and has_quick_fingerprint:
+                confidence = 4
+                reason = "快速内容指纹匹配"
+            elif metadata_match is True:
                 confidence = 3
-                reason = "来源指纹匹配"
+                reason = "原来源标记匹配"
             elif same_parent:
                 confidence = 2
-                reason = "同一预期目录中的旧版文件"
+                reason = "同一预期目录中的无指纹旧文件"
             else:
                 source_count = self.source_stem_counts.get(source_key, 1)
                 if source_count != 1:
@@ -1561,7 +1705,7 @@ class AV1CompressorApp:
                     )
                     continue
                 confidence = 1
-                reason = "输出目录内唯一的旧版结构匹配"
+                reason = "输出目录内唯一的无指纹结构匹配"
             evaluated.append((candidate_resolved, confidence, reason))
 
         if not evaluated:
@@ -1619,7 +1763,13 @@ class AV1CompressorApp:
         try:
             if path.stat().st_size <= 0:
                 return False, "空文件"
-            return self._validate_output(task, path, suspicious=False, existing=True)
+            probe = self._probe_existing_cached(path)
+            metadata_match = self._source_metadata_match(task, probe)
+            if metadata_match is False:
+                return False, "来源快速指纹或来源标记与当前源文件不匹配"
+            return self._validate_output(
+                task, path, suspicious=False, existing=True, probe_data=probe
+            )
         except Exception as exc:
             return False, str(exc)
 
@@ -1756,9 +1906,23 @@ class AV1CompressorApp:
                     raise InterruptedError
                 time.sleep(0.2)
             stderr_thread.join(timeout=2)
-            stderr = "\n".join(stderr_lines)
-            if process.returncode != 0 or stderr.strip():
-                return False, f"完整解码验证失败：{stderr.strip()[-500:]}"
+            benign_lines = [line for line in stderr_lines if is_benign_timestamp_message(line)]
+            failure_lines = [line for line in stderr_lines if not is_benign_timestamp_message(line)]
+
+            # null 封装器可能把重复 DTS 报成 error，甚至返回非零状态，
+            # 但这只说明时间戳不严格单调，不代表 AV1 画面或 Opus 音频无法解码。
+            # 只有出现其余解码错误，或无任何可解释信息却返回非零时，才判失败。
+            if failure_lines:
+                detail = "\n".join(failure_lines).strip()[-1000:]
+                return False, f"完整解码验证失败：{detail}"
+            if process.returncode != 0 and not benign_lines:
+                return False, f"完整解码验证失败：FFmpeg 返回码 {process.returncode}"
+            if benign_lines:
+                self.log(
+                    f"完整解码验证忽略 {len(benign_lines)} 条重复/非单调 DTS 时间戳信息：{path.name}",
+                    logging.WARNING,
+                )
+                return True, "完整解码通过（忽略非单调 DTS 时间戳信息）"
             return True, "完整解码通过"
         finally:
             with self.process_lock:
@@ -1799,9 +1963,20 @@ class AV1CompressorApp:
         record = self.no_gain_records.get(key)
         if record is None:
             return None
+        recorded_fingerprint = str(record.get("source_fingerprint", "")).strip().lower()
+        if recorded_fingerprint:
+            same_source = (
+                record.get("fingerprint_version", QUICK_FINGERPRINT_VERSION) == task.fingerprint_version
+                and recorded_fingerprint == task.source_fingerprint.lower()
+            )
+        else:
+            # 当前版本升级前的中断状态没有指纹，继续按大小和纳秒修改时间恢复。
+            same_source = (
+                record.get("input_size") == task.input_size
+                and record.get("input_mtime_ns") == task.input_mtime_ns
+            )
         expected = (
-            record.get("input_size") == task.input_size
-            and record.get("input_mtime_ns") == task.input_mtime_ns
+            same_source
             and record.get("policy_version") == ENCODING_POLICY_VERSION
             and record.get("crf") == task.crf
             and record.get("audio_policy") == self._audio_policy_signature(task)
@@ -1818,6 +1993,8 @@ class AV1CompressorApp:
             "input_path": str(Path(task.input_path).resolve(strict=False)),
             "input_size": task.input_size,
             "input_mtime_ns": task.input_mtime_ns,
+            "source_fingerprint": task.source_fingerprint,
+            "fingerprint_version": task.fingerprint_version,
             "policy_version": ENCODING_POLICY_VERSION,
             "crf": task.crf,
             "audio_policy": self._audio_policy_signature(task),
