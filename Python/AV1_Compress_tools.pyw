@@ -20,17 +20,24 @@ AV1 压制工具
 
 依赖：Python 3.10+（通常自带 tkinter）、FFmpeg、ffprobe。
 
-代码阅读说明：
-1. 本脚本尽量保持“单文件工具”形态，便于复制、备份和直接运行。
-2. GUI 只在主线程中更新；耗时的扫描、探测和压制工作放在后台线程。
-3. 后台线程不能直接操作 Tkinter 控件，因此所有界面刷新都通过 ui_queue 投递。
-4. FFmpeg 命令全部用 subprocess 的“参数列表”调用，不使用 shell 字符串，避免中文、日文、空格和特殊符号路径被错误解释。
-5. 输出文件一律先写入 .__processing__.mkv，验证通过后再改名为正式文件，防止中断后留下伪完成文件。
-6. 状态文件 .state.json 采用原子写入；无收益记录先落盘，再删除无收益输出，避免重启后重复压制。
-7. 快速内容指纹不是完整哈希，而是稀疏抽样，用于在成品改名或移动后仍能识别来源。
-8. 正常编码优先保持源时间戳 passthrough；只有故障回退时才尝试无损重封装和 CFR 时间戳规范化。
-9. “_待删除原文件”“_无压缩收益”“_压制失败”“_压制临时文件”均会被扫描逻辑排除，避免递归处理归档目录。
-10. 下面的中文注释偏多，是为了方便以后继续维护脚本；功能逻辑本身仍保持自动化和少配置。
+维护说明：
+1. 本脚本只有一个主文件，故意不拆成多个模块，方便用户直接复制、移动或打包。
+2. 同名 JSON 是“用户配置文件”，保存 FFmpeg 路径和软件设置；
+   同名 .state.json 是“运行状态文件”，保存恢复队列、无收益记录等。
+   这两个文件的职责不能混在一起，否则恢复任务和用户偏好会互相污染。
+3. GUI 必须只在 Tk 主线程里更新；后台线程通过 ui_queue 发送消息。
+   不要在工作线程中直接操作 Treeview、Label、Progressbar，否则在 Windows 上容易随机崩溃。
+4. FFmpeg 命令必须始终使用 list[str] 传给 subprocess。
+   不要拼接成一个字符串，也不要 shell=True；这样才能可靠支持中文、日文、空格、括号和特殊符号路径。
+5. 所有正式输出都先写入 .__processing__.mkv 临时文件。
+   只有 FFmpeg 返回成功、ffprobe 验证通过、且体积判断完成后，才会原子替换为正式文件。
+6. “成功移动原文件”“失败移动原文件”“无收益移动原文件”移动的都是源视频，不移动有效成品。
+   这样用户可以清晰看到：成功、失败、无收益三类源文件分别去了哪里。
+7. 自动无损重封装和收益预估都会产生中间文件；这些文件必须放在 _压制临时文件 或用户自定义临时目录，
+   不能放最终输出目录，避免用户误以为它们是成品。
+8. CFR 时间戳规范化只作为失败回退，不作为默认编码路径；默认仍保持 passthrough，最大限度保留原时间轴。
+9. 如果修改默认 CRF、音频策略、输出验证规则或会影响成品体积/结构的逻辑，应该同步提升 ENCODING_POLICY_VERSION，
+   这样旧的“无收益记录”不会错误地阻止新策略重新处理。
 """
 
 from __future__ import annotations
@@ -62,11 +69,6 @@ from tkinter.scrolledtext import ScrolledText
 
 # ----------------------------- 基本路径与常量 -----------------------------
 
-# 重要约定：
-# - 脚本同名 JSON 存放 FFmpeg/ffprobe 路径，首次运行不存在时自动生成模板。
-# - 脚本同名 log 保存完整技术日志；界面日志只显示适合人看的摘要。
-# - 脚本同名 state.json 保存恢复队列、无收益记录和部分设置。
-# - 所有这些文件都放在脚本所在目录，便于把整个工具文件夹搬走。
 SCRIPT_PATH = Path(sys.argv[0]).resolve()
 SCRIPT_DIR = SCRIPT_PATH.parent
 APP_STEM = SCRIPT_PATH.stem
@@ -74,35 +76,48 @@ CONFIG_PATH = SCRIPT_DIR / f"{APP_STEM}.json"
 LOG_PATH = SCRIPT_DIR / f"{APP_STEM}.log"
 STATE_PATH = SCRIPT_DIR / f"{APP_STEM}.state.json"
 
-# 状态文件结构版本。只要字段结构仍兼容，就不要随便递增，避免中断任务无法恢复。
 STATE_SCHEMA_VERSION = 2
-# 编码策略版本。若 CRF 表、音频策略、Preset 等影响输出结果的规则改变，应递增或改名。
+CONFIG_SCHEMA_VERSION = 1
 ENCODING_POLICY_VERSION = "av1-svt-p5-pixel-crf-opus-128-192-v2-old-output-scan"
-# 快速指纹版本。改变抽样算法时应改版本，避免旧指纹被误认为同一算法结果。
 QUICK_FINGERPRINT_VERSION = "sha256-sparse-v1"
-# 每个抽样点读取的大小；默认 256 KiB，5 个点约 1.25 MiB，兼顾速度与可靠性。
 QUICK_FINGERPRINT_CHUNK_SIZE = 256 * 1024
 QUICK_FINGERPRINT_SAMPLE_COUNT = 5
-# 三类源文件归档目录：成功但待人工删除、确认失败、转码无收益。
 PENDING_DELETE_DIRNAME = "_待删除原文件"
 FAILED_DIRNAME = "_压制失败"
 NO_GAIN_DIRNAME = "_无压缩收益"
 TEMP_WORK_DIRNAME = "_压制临时文件"
 
-# 配置文件只保存依赖路径，不暴露大量编码参数，保持工具简单。
-CONFIG_TEMPLATE = {
-    "ffmpeg_path": "",
-    "ffprobe_path": ""
+# DEFAULT_SETTINGS 是“可长期保存的用户偏好”。
+# 这些值会写入同名 JSON，例如 AV1_Compress_tool.json。
+# 注意：不要把正在处理的文件列表、进度、无收益历史等写到这里；那些属于 STATE_PATH。
+# 设计成两份文件的原因：
+# - 配置文件：用户可以手动编辑，跨任务长期存在；
+# - 状态文件：程序自动维护，用于恢复和跳过，内容随任务变化。
+DEFAULT_SETTINGS = {
+    # 软件设置保存在同名 JSON 中；state.json 只负责中断恢复和运行状态。
+    "output_suffix": "_AV1",
+    "recursive": True,
+    "move_original_on_success": True,
+    "move_failed_on_failure": True,
+    "move_no_gain": True,
+    "temp_dir": "",
+    "precheck_enabled": False,
+    "precheck_min_saving_percent": 8.0,
 }
 
-# 扫描文件夹时只处理这些常见视频扩展名。
+CONFIG_TEMPLATE = {
+    "version": CONFIG_SCHEMA_VERSION,
+    "ffmpeg_path": "",
+    "ffprobe_path": "",
+    "settings": DEFAULT_SETTINGS,
+}
+
 VIDEO_EXTENSIONS = {
     ".3gp", ".asf", ".avi", ".flv", ".m2ts", ".m4v", ".mkv", ".mov",
     ".mp4", ".mpeg", ".mpg", ".mts", ".ogm", ".rm", ".rmvb", ".ts",
     ".vob", ".webm", ".wmv"
 }
 
-# 识别无损音频：无损源默认给 Opus 192k，而不是 128k。
 LOSSLESS_AUDIO_CODECS = {
     "alac", "ape", "flac", "mlp", "pcm_alaw", "pcm_bluray", "pcm_dvd",
     "pcm_f16le", "pcm_f24le", "pcm_f32be", "pcm_f32le", "pcm_f64be",
@@ -114,11 +129,9 @@ LOSSLESS_AUDIO_CODECS = {
     "pcm_u8", "shorten", "tak", "truehd", "tta", "wavpack"
 }
 
-# 某些文本字幕在 MKV 中更适合转成 SRT；图片字幕和复杂 ASS/SSA 默认复制。
 TEXT_SUBTITLE_TO_SRT = {"mov_text", "text", "tx3g", "webvtt"}
 
 INVALID_SUFFIX_CHARS = re.compile(r'[<>:"/\\|?*]')
-# 完整解码验证时，stderr 中出现这些词才视为真正可疑；普通时间戳警告单独白名单处理。
 ERROR_WORDS = re.compile(
     r"\b(error|invalid|corrupt|failed|non[- ]monoton(?:ous|ically)|decode_slice_header)\b",
     re.IGNORECASE,
@@ -133,26 +146,70 @@ BENIGN_TIMESTAMP_PATTERNS = (
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+# ----------------------------- 代码阅读索引 -----------------------------
+#
+# 这个脚本经历了多轮功能增强，已经不再只是“调用 FFmpeg 的小按钮”。
+# 为了以后排查问题方便，这里先给出各部分的阅读顺序：
+#
+# 1. 常量区：
+#    - CONFIG_PATH / STATE_PATH / LOG_PATH 决定三个持久文件的位置；
+#    - ENCODING_POLICY_VERSION 决定无收益记录是否仍然可信；
+#    - *_DIRNAME 决定源文件归档目录名称；
+#    - DEFAULT_SETTINGS 决定同名 JSON 的默认软件设置。
+#
+# 2. 数据结构区：
+#    - InputSource：用户添加的“文件”或“文件夹”；
+#    - AudioPlan：某条音轨最终复制还是转 Opus；
+#    - Task：一个待压制视频的完整分析结果，也是任务列表里的核心对象。
+#
+# 3. 通用辅助函数区：
+#    - 路径、时间、字节数、帧率、返回码、错误摘要等都放在这里；
+#    - 这些函数不依赖 GUI，方便以后单独测试。
+#
+# 4. AV1CompressorApp：
+#    - __init__ 只初始化状态；
+#    - _build_ui 创建主界面；
+#    - _open_optional_features 创建“可选功能”窗口；
+#    - _worker_main 是后台任务主循环；
+#    - _scan_tasks 负责扫描、ffprobe 和生成 Task；
+#    - _process_task 负责一个文件从“检查旧成品”到“最终归档”的完整生命周期。
+#
+# 5. 故障回退顺序：
+#    - 首次正常编码：尽量保留原始时间戳 passthrough；
+#    - 访问冲突 0xC0000005：先无损重封装，修复容器/PTS 问题；
+#    - 仍失败且可判断固定帧率：尝试 CFR 时间戳规范化；
+#    - 仍失败：写失败说明并按设置移入 _压制失败。
+#
+# 6. 收益预估顺序：
+#    - 在多个位置截原始样本（-c copy）和 AV1 样本；
+#    - 比较两者“每秒大小”，而不是只看 AV1 样本大小；
+#    - 预计节省不足阈值时写无收益记录，按设置移入 _无压缩收益；
+#    - 预估失败不会让任务失败，只会继续完整压制。
+#
+# 7. 不要轻易改动的地方：
+#    - subprocess 必须用 list[str]，不要 shell=True；
+#    - Tk 控件只能由主线程更新；
+#    - 输出文件必须先写 .__processing__.mkv；
+#    - 移动源文件前必须确保状态已经写入或成品已验证；
+#    - 改编码策略要更新 ENCODING_POLICY_VERSION。
+
+
 # ----------------------------- 数据结构 -----------------------------
 
+# 用户在 GUI 里添加的入口。
+# kind="file" 表示单个文件；kind="dir" 表示文件夹。
+# 文件夹入口会作为相对路径根，用于保持目录结构和归档源文件。
 @dataclass
 class InputSource:
-    """用户添加的输入来源。
-
-    path 是文件或文件夹路径；kind 用于区分单文件和目录扫描。
-    文件夹输入会以该文件夹作为相对路径根，输出目录中保持子目录结构。
-    """
     path: str
     kind: str  # "file" 或 "dir"
 
 
+# 每一条音频流都会生成一个 AudioPlan。
+# 它把“探测到的源音频信息”和“最终怎么处理”放在一起，
+# 后面生成 FFmpeg 命令、验证输出、写状态记录都会复用这份计划。
 @dataclass
 class AudioPlan:
-    """单条音频流的处理计划。
-
-    脚本先用 ffprobe 分析每条音轨，再决定复制已有低码率 Opus，
-    还是转成 Opus 128k/192k。后续生成 FFmpeg 命令时只读取这个计划。
-    """
     input_index: int
     codec: str
     channels: int
@@ -163,16 +220,12 @@ class AudioPlan:
     reason: str
 
 
+# Task 是本工具最核心的数据结构：一个 Task 对应一个源视频。
+# 扫描阶段会把 ffprobe 的结果、自动 CRF、音频策略、字幕/附件列表、
+# 源文件指纹、输出路径、恢复所需信息全部收集到这里。
+# 后台编码线程只处理 Task，不再回头猜测源文件结构。
 @dataclass
 class Task:
-    """一个待处理视频的完整任务描述。
-
-    Task 是后台线程和 GUI 之间传递的核心对象：
-    - input/output 路径说明源文件和目标文件；
-    - width/height/fps/crf/audio_plans 说明自动选择的编码策略；
-    - fingerprint/mtime/size 用于恢复、无收益记录和旧成品匹配；
-    - failure_* 字段用于生成失败说明文件。
-    """
     input_path: str
     output_path: str
     source_root: str
@@ -189,8 +242,7 @@ class Task:
     video_index: int
     video_codec: str
     pix_fmt: str
-    cfr_rate: str = ""
-    cfr_reason: str = ""
+    cfr_fallback_rate: str = ""
     rotation: int = 0
     color_primaries: str = ""
     color_transfer: str = ""
@@ -225,16 +277,12 @@ class Task:
 
 # ----------------------------- 通用辅助函数 -----------------------------
 
-# 原子写 JSON：先写临时文件，再 os.replace。
-# 这样即使程序在写状态文件时崩溃，也不会留下半截 JSON。
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     temp = path.with_name(path.name + ".tmp")
     temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temp, path)
 
 
-# 快速内容指纹用于“识别同一源视频”，不是加密级完整校验。
-# 它比全文件 SHA-256 快很多，适合大量视频扫描时使用。
 def quick_content_fingerprint(path: Path, size: Optional[int] = None) -> str:
     """
     计算快速内容指纹。
@@ -275,21 +323,61 @@ def quick_content_fingerprint(path: Path, size: Optional[int] = None) -> str:
     return hasher.hexdigest()
 
 
-# FFmpeg 经常输出时间戳警告；播放器和成品文件可能仍完全可用。
-# 这些白名单警告不会触发“完整解码失败”。
 def is_benign_timestamp_message(line: str) -> bool:
     return any(pattern.search(line) for pattern in BENIGN_TIMESTAMP_PATTERNS)
 
 
-# 首次运行没有同名 JSON 时，只生成模板并退出。
-# 按用户要求，不从 PATH 猜测 ffmpeg，避免工具悄悄使用了错误版本。
+def clone_default_settings() -> dict[str, Any]:
+    """返回一份默认软件设置副本，避免直接修改 DEFAULT_SETTINGS 常量。"""
+    return json.loads(json.dumps(DEFAULT_SETTINGS, ensure_ascii=False))
+
+
+def normalize_settings(raw: Any) -> dict[str, Any]:
+    """合并并校验同名 JSON 中的软件设置。
+
+    这里的设置是用户偏好，例如后缀、是否移动源文件、是否启用收益预估。
+    它们与 state.json 中的中断恢复记录分开管理；配置缺项时自动补默认值。
+    """
+    settings = clone_default_settings()
+    if isinstance(raw, dict):
+        for key in settings:
+            if key in raw:
+                settings[key] = raw[key]
+
+    settings["output_suffix"] = str(settings.get("output_suffix", "_AV1"))
+    settings["recursive"] = bool(settings.get("recursive", True))
+    settings["move_original_on_success"] = bool(settings.get("move_original_on_success", True))
+    settings["move_failed_on_failure"] = bool(settings.get("move_failed_on_failure", True))
+    settings["move_no_gain"] = bool(settings.get("move_no_gain", True))
+    settings["temp_dir"] = str(settings.get("temp_dir", ""))
+    settings["precheck_enabled"] = bool(settings.get("precheck_enabled", False))
+
+    try:
+        threshold = float(settings.get("precheck_min_saving_percent", 8.0))
+    except (TypeError, ValueError):
+        threshold = 8.0
+    settings["precheck_min_saving_percent"] = min(max(threshold, 1.0), 50.0)
+    return settings
+
+
+def save_config(settings: dict[str, Any], ffmpeg_path: str, ffprobe_path: str) -> None:
+    """把用户偏好写回同名 JSON。
+
+    只写软件配置，不写任务队列、无收益记录、失败记录等运行状态；那些属于 state.json。
+    """
+    atomic_write_json(CONFIG_PATH, {
+        "version": CONFIG_SCHEMA_VERSION,
+        "ffmpeg_path": ffmpeg_path,
+        "ffprobe_path": ffprobe_path,
+        "settings": normalize_settings(settings),
+    })
+
+
 def generate_config_template() -> None:
     atomic_write_json(CONFIG_PATH, CONFIG_TEMPLATE)
 
 
-# 加载用户填写的 ffmpeg/ffprobe 路径，并统一解析为绝对路径。
-# 支持绝对路径，也支持相对于脚本目录的路径。
-def load_config() -> dict[str, str]:
+def load_config() -> dict[str, Any]:
     try:
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -300,22 +388,36 @@ def load_config() -> dict[str, str]:
     if not isinstance(data, dict):
         raise ValueError("配置文件顶层必须是 JSON 对象。")
 
-    ffmpeg = data.get("ffmpeg_path", "")
-    ffprobe = data.get("ffprobe_path", "")
-    if not isinstance(ffmpeg, str) or not isinstance(ffprobe, str):
+    ffmpeg_raw = data.get("ffmpeg_path", "")
+    ffprobe_raw = data.get("ffprobe_path", "")
+    if not isinstance(ffmpeg_raw, str) or not isinstance(ffprobe_raw, str):
         raise ValueError("ffmpeg_path 和 ffprobe_path 必须是字符串。")
-    if not ffmpeg.strip() or not ffprobe.strip():
+    if not ffmpeg_raw.strip() or not ffprobe_raw.strip():
         raise ValueError("请先在同名 JSON 中填写 ffmpeg_path 和 ffprobe_path。")
 
+    settings = normalize_settings(data.get("settings"))
+    # 自动补齐新版本增加的配置键。补写失败不影响启动，只写日志前无法记录。
+    normalized = {
+        "version": CONFIG_SCHEMA_VERSION,
+        "ffmpeg_path": ffmpeg_raw.strip(),
+        "ffprobe_path": ffprobe_raw.strip(),
+        "settings": settings,
+    }
+    try:
+        if data != normalized:
+            atomic_write_json(CONFIG_PATH, normalized)
+    except OSError:
+        pass
+
     return {
-        "ffmpeg_path": str(resolve_dependency_path(ffmpeg.strip())),
-        "ffprobe_path": str(resolve_dependency_path(ffprobe.strip())),
+        "ffmpeg_path": str(resolve_dependency_path(ffmpeg_raw.strip())),
+        "ffprobe_path": str(resolve_dependency_path(ffprobe_raw.strip())),
+        "raw_ffmpeg_path": ffmpeg_raw.strip(),
+        "raw_ffprobe_path": ffprobe_raw.strip(),
+        "settings": settings,
     }
 
 
-# 将 JSON 中的路径解析为实际路径：
-# - 绝对路径原样使用；
-# - 相对路径以脚本目录为基准。
 def resolve_dependency_path(value: str) -> Path:
     candidate = Path(value).expanduser()
     if not candidate.is_absolute():
@@ -326,7 +428,6 @@ def resolve_dependency_path(value: str) -> Path:
     return candidate
 
 
-# Windows 下隐藏 FFmpeg 控制台窗口；其他系统返回空参数。
 def subprocess_options() -> dict[str, Any]:
     options: dict[str, Any] = {}
     if os.name == "nt":
@@ -334,7 +435,6 @@ def subprocess_options() -> dict[str, Any]:
     return options
 
 
-# 把字节数格式化为 KiB/MiB/GiB，供 GUI 和日志显示。
 def format_bytes(value: int) -> str:
     size = float(max(value, 0))
     units = ["B", "KB", "MB", "GB", "TB"]
@@ -345,7 +445,6 @@ def format_bytes(value: int) -> str:
     return f"{size:.2f} TB"
 
 
-# 把秒数格式化为 00:00:00；未知时返回 --:--:--。
 def format_duration(seconds: Optional[float]) -> str:
     if seconds is None or not math.isfinite(seconds) or seconds < 0:
         return "--:--:--"
@@ -355,7 +454,6 @@ def format_duration(seconds: Optional[float]) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
-# ffprobe 常返回 60000/1001 这种分数字符串；这里转成浮点便于比较。
 def parse_fraction(value: Any) -> float:
     if value in (None, "", "0/0", "N/A"):
         return 0.0
@@ -366,76 +464,6 @@ def parse_fraction(value: Any) -> float:
             return float(value)
         except (TypeError, ValueError):
             return 0.0
-
-
-# 精确解析帧率分数。CFR 回退需要保留 30000/1001 这类标准分数。
-def parse_fraction_exact(value: Any) -> Optional[Fraction]:
-    if value in (None, "", "0/0", "N/A"):
-        return None
-    try:
-        fraction = Fraction(str(value))
-    except (ValueError, ZeroDivisionError):
-        try:
-            fraction = Fraction(float(value)).limit_denominator(1001000)
-        except (TypeError, ValueError, OverflowError):
-            return None
-    if fraction <= 0:
-        return None
-    return fraction
-
-
-def format_fraction_for_ffmpeg(value: Fraction) -> str:
-    value = value.limit_denominator(1001000)
-    return str(value.numerator) if value.denominator == 1 else f"{value.numerator}/{value.denominator}"
-
-
-def relative_fraction_error(left: Fraction, right: Fraction) -> float:
-    if left <= 0 or right <= 0:
-        return float("inf")
-    return abs(float(left - right)) / max(float(left), float(right))
-
-
-# CFR 回退帧率判定。
-# 只有在源视频看起来确实是固定帧率时，才允许故障后用 -r + fps_mode cfr 重试。
-# 这样可以修复时间戳异常，又尽量不影响真正的 VFR 视频。
-def choose_cfr_retry_rate(video: dict[str, Any]) -> tuple[str, str]:
-    """Return an FFmpeg -r value for safe CFR retry, or ("", reason).
-
-    This is only used after passthrough encoding and remux retry have failed.
-    It intentionally accepts only clearly stable, common frame rates.
-    """
-    avg = parse_fraction_exact(video.get("avg_frame_rate"))
-    nominal = parse_fraction_exact(video.get("r_frame_rate"))
-    rate = avg or nominal
-    if rate is None:
-        return "", "无法取得稳定帧率"
-
-    if nominal is not None and avg is not None and relative_fraction_error(avg, nominal) > 0.001:
-        return "", f"avg_frame_rate 与 r_frame_rate 差异较大：{format_fraction_for_ffmpeg(avg)} vs {format_fraction_for_ffmpeg(nominal)}"
-
-    fps = float(rate)
-    if fps < 5.0 or fps > 240.0:
-        return "", f"帧率不在自动 CFR 回退范围内：{fps:.3f}"
-
-    common_rates = [
-        Fraction(24000, 1001), Fraction(24, 1), Fraction(25, 1),
-        Fraction(30000, 1001), Fraction(30, 1), Fraction(50, 1),
-        Fraction(60000, 1001), Fraction(60, 1), Fraction(100, 1),
-        Fraction(120000, 1001), Fraction(120, 1),
-    ]
-    closest = min(common_rates, key=lambda item: relative_fraction_error(rate, item))
-    if relative_fraction_error(rate, closest) <= 0.001:
-        return format_fraction_for_ffmpeg(closest), f"稳定常见帧率 {float(closest):.3f} fps"
-
-    # 有些站点会使用整数以外但仍很稳定的帧率；如果帧数和时长匹配，允许回退。
-    nb_frames = parse_int(video.get("nb_frames"), 0)
-    duration = parse_float(video.get("duration"), 0.0)
-    if nb_frames > 0 and duration > 0:
-        counted = Fraction(nb_frames, 1) / Fraction(str(duration))
-        if relative_fraction_error(rate, counted) <= 0.002:
-            return format_fraction_for_ffmpeg(rate), f"帧数/时长匹配的稳定帧率 {fps:.3f} fps"
-
-    return "", f"不是常见稳定帧率：{fps:.3f}"
 
 
 def parse_int(value: Any, default: int = 0) -> int:
@@ -454,6 +482,60 @@ def parse_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def parse_rate_fraction(value: Any) -> Optional[Fraction]:
+    """把 ffprobe 的 60/1、30000/1001 这类帧率解析为 Fraction。"""
+    if value in (None, "", "0/0", "N/A"):
+        return None
+    try:
+        fraction = Fraction(str(value))
+        if fraction <= 0:
+            return None
+        return fraction
+    except (ValueError, ZeroDivisionError):
+        try:
+            numeric = float(value)
+            if numeric <= 0:
+                return None
+            return Fraction(numeric).limit_denominator(1001000)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+
+
+def frame_rate_arg(rate: Fraction) -> str:
+    """把 Fraction 转成 FFmpeg -r 参数；整数帧率用整数，小数帧率保留分数。"""
+    if rate.denominator == 1:
+        return str(rate.numerator)
+    return f"{rate.numerator}/{rate.denominator}"
+
+
+def detect_cfr_fallback_rate(video_stream: dict[str, Any]) -> str:
+    """判断源视频是否适合在失败回退时做 CFR 时间戳规范化。
+
+    正常路径仍使用 passthrough。只有编码/重封装重试失败后，才可能使用这里返回的帧率。
+    """
+    r_rate = parse_rate_fraction(video_stream.get("r_frame_rate"))
+    avg_rate = parse_rate_fraction(video_stream.get("avg_frame_rate"))
+    if r_rate is None or avg_rate is None:
+        return ""
+    r_value = float(r_rate)
+    avg_value = float(avg_rate)
+    if r_value <= 0 or avg_value <= 0 or avg_value > 240:
+        return ""
+    if abs(r_value - avg_value) / max(avg_value, 0.001) > 0.001:
+        return ""
+
+    # 常见固定帧率。非常规帧率不自动 CFR，避免误处理真正的 VFR 素材。
+    common = [
+        Fraction(24000, 1001), Fraction(24, 1), Fraction(25, 1),
+        Fraction(30000, 1001), Fraction(30, 1), Fraction(50, 1),
+        Fraction(60000, 1001), Fraction(60, 1), Fraction(120, 1),
+    ]
+    chosen = min(common, key=lambda item: abs(float(item) - avg_value))
+    if abs(float(chosen) - avg_value) / avg_value <= 0.001:
+        return frame_rate_arg(chosen)
+    return ""
 
 
 def parse_ffmpeg_time(value: str) -> float:
@@ -477,8 +559,6 @@ def format_process_return_code(return_code: int) -> str:
     return f"{return_code} / 0x{unsigned:08X}" if return_code != 0 else "0"
 
 
-# 从 FFmpeg stderr 中提取“人能看懂”的错误摘要。
-# 访问冲突等崩溃没有正常 error 行，因此必须结合返回码判断。
 def summarize_ffmpeg_failure(return_code: int, stderr_lines: list[str]) -> str:
     unsigned = return_code & 0xFFFFFFFF
     if unsigned == 0xC0000005:
@@ -527,8 +607,6 @@ def unique_path(path: Path, reserved: set[str]) -> Path:
     return candidate
 
 
-# 根据每帧像素总数、HDR 和高帧率自动选择 CRF。
-# 这里不看横竖屏，只看 width*height，因此 1080x1920 和 1920x1080 同档。
 def choose_crf(pixels: int, hdr_type: str, fps: float) -> int:
     if pixels <= 600_000:
         crf = 24
@@ -564,7 +642,6 @@ def infer_bit_depth(stream: dict[str, Any]) -> int:
     return 8
 
 
-# 粗略识别 HDR10/HLG。Dolby Vision 另有专门检测，默认跳过以避免破坏动态元数据。
 def detect_hdr_type(video: dict[str, Any]) -> str:
     transfer = str(video.get("color_transfer", "")).lower()
     if transfer == "smpte2084":
@@ -612,8 +689,6 @@ def get_rotation(video: dict[str, Any]) -> int:
     return 0
 
 
-# 音频策略：已有合适 Opus 尽量复制；普通有损低码率用 128k；
-# 无损、高码率或未知信息用 192k，避免过度压缩。
 def audio_plan_for_stream(stream: dict[str, Any]) -> AudioPlan:
     codec = str(stream.get("codec_name", "unknown")).lower()
     channels = parse_int(stream.get("channels"), 0)
@@ -664,7 +739,6 @@ def audio_plan_for_stream(stream: dict[str, Any]) -> AudioPlan:
     )
 
 
-# 尽量从 format.duration 获取总时长，失败时退回各流 duration 的最大值。
 def get_duration(probe: dict[str, Any], main_video: dict[str, Any]) -> float:
     duration = parse_float((probe.get("format") or {}).get("duration"), 0.0)
     if duration > 0:
@@ -678,24 +752,14 @@ def get_duration(probe: dict[str, Any], main_video: dict[str, Any]) -> float:
 
 # ----------------------------- 主程序 -----------------------------
 
-# 维护指南：
-# 1. 如果只改 GUI 文案或布局，通常不需要改 ENCODING_POLICY_VERSION。
-# 2. 如果改了 CRF 表、Preset、音频码率、是否 CFR 默认启用等，会影响输出结果，应修改 ENCODING_POLICY_VERSION。
-# 3. 如果改了 state.json 字段结构且不兼容旧状态，应递增 STATE_SCHEMA_VERSION。
-# 4. 如果改了快速指纹抽样方式，应修改 QUICK_FINGERPRINT_VERSION。
-# 5. 不要把 FFmpeg 命令改成字符串加 shell=True；那会让非 ASCII 路径和特殊字符更容易出错。
-# 6. 任何会删除或移动源文件的逻辑，都应先完成输出验证或状态写入。
-# 7. 新增失败回退时要限制触发条件和次数，避免同一个坏文件无限重试。
-# 8. Tkinter 控件只能在主线程更新；后台线程新增 UI 更新时，请通过 self.ui_queue。
-# 9. 新增扫描目录时，记得排除四个内部目录，防止处理自己的归档/临时文件。
-# 10. 新增容器或字幕处理规则时，优先保证“不静默丢流”，宁可跳过也不要悄悄损坏归档。
 class AV1CompressorApp:
-    # 初始化应用状态。
-    # 注意：Tkinter 控件只在主线程创建和更新；后台线程通过 ui_queue 与主线程通信。
-    def __init__(self, root: tk.Tk, config: dict[str, str]) -> None:
+    def __init__(self, root: tk.Tk, config: dict[str, Any]) -> None:
         self.root = root
         self.ffmpeg = config["ffmpeg_path"]
         self.ffprobe = config["ffprobe_path"]
+        self.raw_ffmpeg_path = config.get("raw_ffmpeg_path", config["ffmpeg_path"])
+        self.raw_ffprobe_path = config.get("raw_ffprobe_path", config["ffprobe_path"])
+        self.settings = normalize_settings(config.get("settings"))
 
         self.ui_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.stop_event = threading.Event()
@@ -713,9 +777,11 @@ class AV1CompressorApp:
         self.move_original_enabled = True
         self.move_failed_enabled = True
         self.move_no_gain_enabled = True
+        self.precheck_enabled = bool(self.settings.get("precheck_enabled", False))
+        self.precheck_threshold = float(self.settings.get("precheck_min_saving_percent", 8.0))
         self.custom_temp_root: Optional[Path] = None
         self.options_window: Optional[tk.Toplevel] = None
-        self.current_state_context: Optional[tuple[list[InputSource], Path, str, bool, bool, bool, bool, str]] = None
+        self.current_state_context: Optional[tuple[list[InputSource], Path, str, bool, bool, bool, bool, str, bool]] = None
         self.existing_output_files: list[Path] = []
         self.existing_output_name_index: dict[str, list[Path]] = {}
         self.existing_output_probe_cache: dict[str, dict[str, Any]] = {}
@@ -733,7 +799,6 @@ class AV1CompressorApp:
 
     # ---------- 日志 ----------
 
-    # 创建滚动日志。完整 FFmpeg 命令、stderr、失败原因都会写到这里，方便排查。
     def _create_logger(self) -> logging.Logger:
         logger = logging.getLogger(f"{APP_STEM}-{id(self)}")
         logger.setLevel(logging.DEBUG)
@@ -753,20 +818,38 @@ class AV1CompressorApp:
         logger.info("程序启动：%s", SCRIPT_PATH)
         return logger
 
-    # 同时写文件日志和界面日志；gui=False 时只写文件，避免界面刷屏。
     def log(self, text: str, level: int = logging.INFO, gui: bool = True) -> None:
         self.logger.log(level, text)
         if gui:
             self.ui_queue.put(("log", text))
 
+    def _current_settings(self) -> dict[str, Any]:
+        """从 GUI 变量收集当前软件设置。"""
+        return normalize_settings({
+            "output_suffix": self.suffix_var.get() if hasattr(self, "suffix_var") else self.settings.get("output_suffix", "_AV1"),
+            "recursive": self.recursive_var.get() if hasattr(self, "recursive_var") else self.settings.get("recursive", True),
+            "move_original_on_success": self.move_original_var.get() if hasattr(self, "move_original_var") else self.settings.get("move_original_on_success", True),
+            "move_failed_on_failure": self.move_failed_var.get() if hasattr(self, "move_failed_var") else self.settings.get("move_failed_on_failure", True),
+            "move_no_gain": self.move_no_gain_var.get() if hasattr(self, "move_no_gain_var") else self.settings.get("move_no_gain", True),
+            "temp_dir": self.temp_dir_var.get() if hasattr(self, "temp_dir_var") else self.settings.get("temp_dir", ""),
+            "precheck_enabled": self.precheck_var.get() if hasattr(self, "precheck_var") else self.settings.get("precheck_enabled", False),
+            "precheck_min_saving_percent": self.settings.get("precheck_min_saving_percent", 8.0),
+        })
+
+    def _persist_settings(self) -> None:
+        """把软件偏好保存到同名 JSON；失败只记录日志，不影响当前压制。"""
+        self.settings = self._current_settings()
+        try:
+            save_config(self.settings, self.raw_ffmpeg_path, self.raw_ffprobe_path)
+        except Exception:
+            self.logger.exception("保存配置文件失败：%s", CONFIG_PATH)
+
     # ---------- GUI ----------
 
-    # 构建主界面。主窗口固定宽度，允许纵向拉伸，避免长文件名把控件挤乱。
     def _build_ui(self) -> None:
         self.root.title(APP_STEM)
         self.root.geometry("780x920")
         self.root.minsize(780, 620)
-        self.root.resizable(False, True)
 
         main = ttk.Frame(self.root, padding=10)
         main.pack(fill=tk.BOTH, expand=True)
@@ -800,12 +883,13 @@ class AV1CompressorApp:
         ttk.Button(output_frame, text="选择", command=self._choose_output).grid(row=0, column=2)
 
         # 次要设置保留原变量和状态格式，仅从主界面移入“可选功能”窗口。
-        self.suffix_var = tk.StringVar(value="_AV1")
-        self.recursive_var = tk.BooleanVar(value=True)
-        self.move_original_var = tk.BooleanVar(value=True)
-        self.move_failed_var = tk.BooleanVar(value=True)
-        self.move_no_gain_var = tk.BooleanVar(value=True)
-        self.temp_dir_var = tk.StringVar(value="")
+        self.suffix_var = tk.StringVar(value=str(self.settings.get("output_suffix", "_AV1")))
+        self.recursive_var = tk.BooleanVar(value=bool(self.settings.get("recursive", True)))
+        self.move_original_var = tk.BooleanVar(value=bool(self.settings.get("move_original_on_success", True)))
+        self.move_failed_var = tk.BooleanVar(value=bool(self.settings.get("move_failed_on_failure", True)))
+        self.move_no_gain_var = tk.BooleanVar(value=bool(self.settings.get("move_no_gain", True)))
+        self.temp_dir_var = tk.StringVar(value=str(self.settings.get("temp_dir", "")))
+        self.precheck_var = tk.BooleanVar(value=bool(self.settings.get("precheck_enabled", False)))
         self.optional_button = ttk.Button(
             output_frame,
             text="可选功能",
@@ -880,7 +964,6 @@ class AV1CompressorApp:
         self.log_text = ScrolledText(log_frame, height=9, wrap=tk.WORD, state=tk.DISABLED)
         self.log_text.grid(row=0, column=0, sticky="nsew")
 
-    # 可选功能窗口：把不常改的设置从主界面移走，让主界面保持简洁。
     def _open_optional_features(self) -> None:
         if self.options_window is not None and self.options_window.winfo_exists():
             self.options_window.deiconify()
@@ -926,8 +1009,14 @@ class AV1CompressorApp:
             variable=self.recursive_var,
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
+        ttk.Checkbutton(
+            body,
+            text="压制前进行收益预估；预计节省不足配置阈值时归入“_无压缩收益”",
+            variable=self.precheck_var,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
         temp_frame = ttk.LabelFrame(body, text="临时工作目录", padding=8)
-        temp_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        temp_frame.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(14, 0))
         temp_frame.columnconfigure(0, weight=1)
         ttk.Entry(temp_frame, textvariable=self.temp_dir_var, width=54).grid(row=0, column=0, sticky="ew", padx=(0, 6))
         ttk.Button(temp_frame, text="选择", command=self._choose_temp_dir).grid(row=0, column=1)
@@ -938,9 +1027,10 @@ class AV1CompressorApp:
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         button_row = ttk.Frame(body)
-        button_row.grid(row=6, column=0, columnspan=2, sticky="e", pady=(16, 0))
+        button_row.grid(row=7, column=0, columnspan=2, sticky="e", pady=(16, 0))
 
         def close_window() -> None:
+            self._persist_settings()
             try:
                 window.grab_release()
             except tk.TclError:
@@ -959,7 +1049,6 @@ class AV1CompressorApp:
         window.grab_set()
         suffix_entry.focus_set()
 
-    # 添加零散视频文件。零散文件输出到输出目录根部。
     def _add_files(self) -> None:
         paths = filedialog.askopenfilenames(
             title="选择视频文件",
@@ -968,7 +1057,6 @@ class AV1CompressorApp:
         for value in paths:
             self._add_source(InputSource(str(Path(value).resolve()), "file"))
 
-    # 添加文件夹。扫描时会按此文件夹作为 source_root，输出保持相对路径。
     def _add_folder(self) -> None:
         value = filedialog.askdirectory(title="选择输入文件夹")
         if value:
@@ -1004,7 +1092,6 @@ class AV1CompressorApp:
 
     # ---------- 开始 / 停止 ----------
 
-    # 开始按钮入口：读取 GUI 设置，做基础校验，然后启动后台工作线程。
     def _start(self) -> None:
         if self.running:
             return
@@ -1041,6 +1128,7 @@ class AV1CompressorApp:
         self.task_tree.delete(*self.task_tree.get_children())
         self.tree_items.clear()
 
+        self._persist_settings()
         temp_dir_text = self.temp_dir_var.get().strip()
         if temp_dir_text:
             try:
@@ -1058,14 +1146,14 @@ class AV1CompressorApp:
         move_original = bool(self.move_original_var.get())
         move_failed = bool(self.move_failed_var.get())
         move_no_gain = bool(self.move_no_gain_var.get())
+        precheck_enabled = bool(self.precheck_var.get())
         self.worker = threading.Thread(
             target=self._worker_main,
-            args=(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text),
+            args=(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, precheck_enabled),
             daemon=True,
         )
         self.worker.start()
 
-    # 停止按钮只设置停止标记并终止当前 FFmpeg；不会删除源文件或误写成功状态。
     def _stop(self) -> None:
         if not self.running:
             return
@@ -1075,7 +1163,6 @@ class AV1CompressorApp:
         self.current_detail_text.set("")
         threading.Thread(target=self._terminate_current_process, daemon=True).start()
 
-    # 尝试优雅终止当前 FFmpeg，超时后强制 kill。
     def _terminate_current_process(self) -> None:
         with self.process_lock:
             process = self.current_process
@@ -1092,8 +1179,6 @@ class AV1CompressorApp:
 
     # ---------- 后台总流程 ----------
 
-    # 后台主流程：启动检查 -> 清理临时目录 -> 扫描任务 -> 逐个处理 -> 保存状态。
-    # 这个函数运行在工作线程，不能直接操作 Tk 控件。
     def _worker_main(
         self,
         sources: list[InputSource],
@@ -1104,12 +1189,14 @@ class AV1CompressorApp:
         move_failed: bool,
         move_no_gain: bool,
         temp_dir_text: str,
+        precheck_enabled: bool,
     ) -> None:
         self.move_original_enabled = move_original
         self.move_failed_enabled = move_failed
         self.move_no_gain_enabled = move_no_gain
+        self.precheck_enabled = precheck_enabled
         self.custom_temp_root = self._resolve_temp_dir_text(temp_dir_text) if temp_dir_text.strip() else None
-        self.current_state_context = (sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text)
+        self.current_state_context = (sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, precheck_enabled)
         try:
             self._startup_checks(output_dir)
             self._cleanup_temp_work_dirs(sources)
@@ -1126,7 +1213,7 @@ class AV1CompressorApp:
             self.completed_weight = 0.0
             self.completed_count = 0
             self.batch_started_at = time.monotonic()
-            self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, active=True)
+            self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, precheck_enabled, active=True)
 
             for task in tasks:
                 if self.stop_event.is_set():
@@ -1142,7 +1229,7 @@ class AV1CompressorApp:
                 task.status = "处理中"
                 task.message = ""
                 self._update_task_ui(task)
-                self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, active=True)
+                self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, precheck_enabled, active=True)
 
                 result_status, message = self._process_task(task)
                 task.status = result_status
@@ -1156,7 +1243,7 @@ class AV1CompressorApp:
                 ):
                     # 先保存失败状态，再移动源文件；异常退出时仍有可追踪记录。
                     self._save_state(
-                        sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, active=True
+                        sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, precheck_enabled, active=True
                     )
                     moved, move_detail = self._move_original_to_failed(task)
                     if moved:
@@ -1168,9 +1255,9 @@ class AV1CompressorApp:
                 self.completed_count += 1
                 self._update_task_ui(task)
                 self._update_overall_progress(0.0, 0.0, None)
-                self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, active=True)
+                self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, precheck_enabled, active=True)
 
-            self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, active=False)
+            self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, precheck_enabled, active=False)
             success = sum(1 for t in tasks if t.status == "完成")
             skipped = sum(1 for t in tasks if t.status in {"跳过", "无收益"})
             failed = sum(1 for t in tasks if t.status == "失败")
@@ -1181,7 +1268,7 @@ class AV1CompressorApp:
         except InterruptedError:
             self.log("任务已停止；未完成队列会在下次启动时提供恢复。", logging.WARNING)
             try:
-                self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, active=True)
+                self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, precheck_enabled, active=True)
             except Exception:
                 self.logger.exception("保存停止状态失败")
             self.ui_queue.put(("stopped", "任务已停止"))
@@ -1189,14 +1276,13 @@ class AV1CompressorApp:
             self.logger.exception("后台任务异常")
             self.log(f"任务中止：{exc}", logging.ERROR)
             try:
-                self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, active=True)
+                self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, precheck_enabled, active=True)
             except Exception:
                 self.logger.exception("保存异常状态失败")
             self.ui_queue.put(("failed", str(exc)))
 
     # ---------- 临时工作目录 ----------
 
-    # 解析可选功能中的自定义临时目录；留空表示使用输入根目录下的 _压制临时文件。
     def _resolve_temp_dir_text(self, value: str) -> Path:
         text = value.strip()
         if not text:
@@ -1206,14 +1292,11 @@ class AV1CompressorApp:
             path = SCRIPT_DIR / path
         return path.resolve(strict=False)
 
-    # 为某个输入根目录选择临时工作目录，避免把重封装中间文件放到最终输出目录。
     def _temp_root_for_source_path(self, source_root: Path) -> Path:
         if self.custom_temp_root is not None:
             return self.custom_temp_root
         return source_root.resolve(strict=False) / TEMP_WORK_DIRNAME
 
-    # 启动和任务结束时清理遗留临时文件。
-    # 只清理本工具命名的工作目录，不碰用户普通文件。
     def _cleanup_temp_work_dirs(self, sources: list[InputSource]) -> None:
         roots: set[Path] = set()
         if self.custom_temp_root is not None:
@@ -1230,10 +1313,11 @@ class AV1CompressorApp:
             if not root.exists():
                 continue
             try:
-                for path in root.rglob("*.__remux_retry__.mkv"):
+                temp_candidates = list(root.rglob("*.av1tooltmp.*")) + list(root.rglob("*.__remux_retry__.mkv"))
+                for path in temp_candidates:
                     try:
                         path.unlink()
-                        self.log(f"清理上次遗留重封装临时文件：{path}", gui=False)
+                        self.log(f"清理上次遗留临时文件：{path}", gui=False)
                     except OSError as exc:
                         self.log(f"无法清理重封装临时文件：{path}：{exc}", logging.WARNING)
                 self._remove_empty_dirs_under(root, remove_root=(self.custom_temp_root is None and root.name == TEMP_WORK_DIRNAME))
@@ -1258,7 +1342,6 @@ class AV1CompressorApp:
         except OSError:
             pass
 
-    # 为自动无损重封装生成临时 MKV 路径，路径中包含快速指纹，降低重名风险。
     def _remux_retry_path_for_task(self, task: Task) -> Path:
         source_root = Path(task.source_root)
         temp_root = self._temp_root_for_source_path(source_root)
@@ -1269,10 +1352,9 @@ class AV1CompressorApp:
         relative_parent = relative.parent if str(relative.parent) != "." else Path()
         stem = Path(task.input_path).stem
         fingerprint = (task.source_fingerprint or "nofp")[:12]
-        name = f"{stem}.{fingerprint}.__remux_retry__.mkv"
+        name = f"{stem}.{fingerprint}.av1tooltmp.__remux_retry__.mkv"
         return temp_root / relative_parent / name
 
-    # 重封装前检查临时目录空间。中间 MKV 接近源文件大小，因此必须先确认磁盘空间。
     def _prepare_remux_retry_path(self, task: Task, remux_path: Path) -> str:
         try:
             remux_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1299,7 +1381,6 @@ class AV1CompressorApp:
 
     # ---------- 环境检查 ----------
 
-    # 点击开始后的依赖检查：ffmpeg/ffprobe 是否可用、编码器是否存在、输出目录是否可写。
     def _startup_checks(self, output_dir: Path) -> None:
         self.log("开始启动前检查。")
         for executable, name in ((self.ffmpeg, "FFmpeg"), (self.ffprobe, "ffprobe")):
@@ -1376,8 +1457,6 @@ class AV1CompressorApp:
 
     # ---------- 扫描与探测 ----------
 
-    # 扫描输入来源，生成 Task 列表。
-    # 这里会排除 _待删除原文件、_无压缩收益、_压制失败、_压制临时文件。
     def _scan_tasks(
         self,
         sources: list[InputSource],
@@ -1428,7 +1507,7 @@ class AV1CompressorApp:
                     or is_relative_to(resolved, temp_work_root)
                 ):
                     continue
-                if ".__processing__" in resolved.name or ".__remux_retry__" in resolved.name:
+                if ".__processing__" in resolved.name or ".__remux_retry__" in resolved.name or ".av1tooltmp." in resolved.name:
                     continue
                 key = os.path.normcase(str(resolved))
                 if key in seen:
@@ -1468,7 +1547,6 @@ class AV1CompressorApp:
             self.source_stem_counts[key] = self.source_stem_counts.get(key, 0) + 1
         return tasks
 
-    # 预扫描输出目录中的 MKV 成品，供旧成品复用逻辑使用。
     def _index_existing_outputs(self, output_dir: Path) -> list[Path]:
         """一次性索引输出目录中的 MKV，避免每个任务都递归扫描磁盘。"""
         results: list[Path] = []
@@ -1518,7 +1596,6 @@ class AV1CompressorApp:
                 index.setdefault(key, []).append(path)
         return index
 
-    # 封装 ffprobe 调用，统一返回 JSON。所有媒体判断都应来自这里的结构化结果。
     def _probe(self, path: Path) -> dict[str, Any]:
         command = [
             self.ffprobe,
@@ -1546,8 +1623,6 @@ class AV1CompressorApp:
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"ffprobe JSON 无法解析：{exc}") from exc
 
-    # 将 ffprobe 结果转换成 Task。
-    # 这里是“自动判断”的核心：分辨率、CRF、音频策略、字幕/附件映射都在此确定。
     def _task_from_probe(
         self,
         path: Path,
@@ -1619,7 +1694,6 @@ class AV1CompressorApp:
             return None
 
         fps = parse_fraction(video.get("avg_frame_rate")) or parse_fraction(video.get("r_frame_rate"))
-        cfr_rate, cfr_reason = choose_cfr_retry_rate(video)
         hdr_type = detect_hdr_type(video)
         side_data_types = [
             str(item.get("side_data_type", "")).strip()
@@ -1640,6 +1714,7 @@ class AV1CompressorApp:
             width, height = raw_width, raw_height
         pixels = raw_width * raw_height
         crf = choose_crf(pixels, hdr_type, fps)
+        cfr_fallback_rate = detect_cfr_fallback_rate(video)
 
         audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
         audio_plans = [audio_plan_for_stream(s) for s in audio_streams]
@@ -1686,12 +1761,11 @@ class AV1CompressorApp:
             fps=fps,
             pixels=pixels,
             crf=crf,
+            cfr_fallback_rate=cfr_fallback_rate,
             hdr_type=hdr_type,
             video_index=parse_int(video.get("index")),
             video_codec=video_codec,
             pix_fmt=pix_fmt,
-            cfr_rate=cfr_rate,
-            cfr_reason=cfr_reason,
             rotation=rotation,
             color_primaries=str(video.get("color_primaries", "")),
             color_transfer=str(video.get("color_transfer", "")),
@@ -1745,9 +1819,272 @@ class AV1CompressorApp:
         )
         return task
 
+    # ---------- 压制前收益预估 ----------
+
+    def _precheck_sample_specs(self, task: Task) -> list[tuple[float, float]]:
+        """根据视频时长决定收益预估的抽样位置。
+
+        为什么不是只抽开头：
+        - 开头常常是黑场、片头、Logo 或静态画面，码率代表性很差；
+        - 结尾可能是字幕，也不能单独代表整片；
+        - 25% / 50% / 75% 位置通常更接近正片内容。
+
+        返回值是若干 (开始秒数, 抽样时长) 元组。短视频不预估，直接完整压制，
+        因为抽样本身已经接近完整压制时间，收益不大。
+        """
+        duration = max(float(task.duration), 0.0)
+        if duration <= 120:
+            return []
+        if duration <= 8 * 60:
+            sample_len = 15.0
+            ratios = (0.12, 0.50, 0.88)
+        else:
+            sample_len = 20.0
+            ratios = (0.02, 0.25, 0.50, 0.75, 0.96)
+
+        specs: list[tuple[float, float]] = []
+        latest_start = max(duration - sample_len - 0.5, 0.0)
+        used: set[int] = set()
+        for ratio in ratios:
+            start = min(max(duration * ratio, 0.0), latest_start)
+            # 以 0.5 秒为粒度去重，避免短片中多个比例落到同一段。
+            bucket = int(start * 2)
+            if bucket in used:
+                continue
+            used.add(bucket)
+            specs.append((start, min(sample_len, duration - start)))
+        return specs
+
+    def _precheck_sample_path(self, task: Task, sample_index: int, kind: str) -> Path:
+        """生成收益预估临时样本路径。
+
+        kind 只用于文件名区分：
+        - orig：源片段，使用 -c copy，无损截取；
+        - av1：同位置 AV1/Opus 样本，使用正式压制参数。
+
+        文件名中包含快速指纹前缀，能减少不同同名视频同时处理时的冲突。
+        所有样本都放在 _压制临时文件 或用户指定的临时目录，完成后会清理。
+        """
+        source_root = Path(task.source_root)
+        temp_root = self._temp_root_for_source_path(source_root)
+        try:
+            relative = Path(task.source_relative)
+            relative_parent = relative.parent if str(relative.parent) != "." else Path()
+        except Exception:
+            relative_parent = Path()
+        stem = Path(task.input_path).stem
+        fingerprint = (task.source_fingerprint or "nofp")[:12]
+        name = f"{stem}.{fingerprint}.av1tooltmp.precheck{sample_index:02d}.{kind}.mkv"
+        return temp_root / relative_parent / name
+
+    def _build_precheck_original_sample_command(self, task: Task, start: float, length: float, sample_path: Path) -> list[str]:
+        """构造“原始样本”命令。
+
+        原始样本只做 stream copy，不重新编码，因此不会损失质量，速度也非常快。
+        这里主要为了得到“同一时间段在源文件中本来占多大空间”。
+        与 AV1 样本比较时，用“每秒字节数”而不是裸文件大小，
+        这样即使 -c copy 因关键帧对齐造成片段稍长，也不会严重影响判断。
+        """
+        command = [
+            self.ffmpeg,
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-loglevel", "warning",
+            "-ss", f"{start:.3f}",
+            "-t", f"{length:.3f}",
+            "-i", task.input_path,
+            "-map", f"0:{task.video_index}",
+        ]
+        for plan in task.audio_plans:
+            command += ["-map", f"0:{plan.input_index}"]
+        command += [
+            "-map_metadata", "-1",
+            "-map_chapters", "-1",
+            "-c", "copy",
+            "-max_muxing_queue_size", "4096",
+            "-f", "matroska",
+            str(sample_path),
+        ]
+        return command
+
+    def _build_precheck_av1_sample_command(self, task: Task, start: float, length: float, sample_path: Path) -> list[str]:
+        """构造“AV1 样本”命令。
+
+        这条命令使用与正式压制一致的核心策略：SVT-AV1 Preset 5、自动 CRF、10-bit、Opus 音频。
+        不写入来源标签，也不映射字幕/附件，因为收益预估只关心音视频主体体积。
+        预估失败不会让任务失败，只会回退到完整压制。
+        """
+        command = [
+            self.ffmpeg,
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-loglevel", "warning",
+            "-ss", f"{start:.3f}",
+            "-t", f"{length:.3f}",
+            "-i", task.input_path,
+            "-map", f"0:{task.video_index}",
+        ]
+        for plan in task.audio_plans:
+            command += ["-map", f"0:{plan.input_index}"]
+        command += [
+            "-map_metadata", "-1",
+            "-map_chapters", "-1",
+            "-c:v:0", "libsvtav1",
+            "-preset", "5",
+            "-crf", str(task.crf),
+            "-svtav1-params", "tune=0",
+            "-pix_fmt", "yuv420p10le",
+            "-fps_mode:v:0", "passthrough",
+        ]
+        for audio_output_index, plan in enumerate(task.audio_plans):
+            if plan.action == "copy":
+                command += [f"-c:a:{audio_output_index}", "copy"]
+            else:
+                command += [
+                    f"-c:a:{audio_output_index}", "libopus",
+                    f"-b:a:{audio_output_index}", f"{plan.target_kbps}k",
+                    f"-vbr:a:{audio_output_index}", "on",
+                    f"-compression_level:a:{audio_output_index}", "10",
+                ]
+        command += [
+            "-max_muxing_queue_size", "4096",
+            "-f", "matroska",
+            str(sample_path),
+        ]
+        return command
+
+    def _probe_duration_or_default(self, path: Path, fallback: float) -> float:
+        """读取样本实际时长；失败时回退到计划时长。
+
+        收益预估使用“每秒大小”比较，因此最好知道样本实际时长。
+        ffprobe 失败不值得中断主流程，此时使用 fallback 即可。
+        """
+        try:
+            probe = self._probe(path)
+            duration = parse_float((probe.get("format") or {}).get("duration"), 0.0)
+            if duration > 0:
+                return duration
+        except Exception:
+            pass
+        return max(fallback, 0.001)
+
+    def _estimate_no_gain_before_encoding(self, task: Task) -> tuple[bool, str, int]:
+        """压制前收益预估。
+
+        核心思想：不要只看“AV1 样本有多大”，而要比较“同一时间段的源样本”和“同一时间段的 AV1 样本”。
+        这样可以自动考虑原文件在不同位置的码率分布，比简单按样本时长放大更准确。
+
+        返回：
+        - should_skip：True 表示预计收益不足，应直接归类到“_无压缩收益”；
+        - detail：给日志和 GUI 使用的人类可读说明；
+        - estimated_output_size：估算完整输出体积，用于写入无收益记录。
+        """
+        specs = self._precheck_sample_specs(task)
+        if not specs:
+            return False, "视频较短，跳过收益预估，直接完整压制", 0
+
+        # 样本文件可能接近源文件片段大小，因此先检查临时目录空间。
+        # 估算需要空间：源片段 + AV1片段 + 余量。这里按源文件 20% 与 512MiB 取较小上限，避免误拦截。
+        first_sample = self._precheck_sample_path(task, 0, "spacecheck")
+        first_sample.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            free = shutil.disk_usage(first_sample.parent).free
+        except OSError as exc:
+            raise RuntimeError(f"无法检查收益预估临时目录空间：{exc}")
+        planned_seconds = sum(length for _, length in specs)
+        rough_need = int(max(task.input_size * min(planned_seconds / max(task.duration, 1.0), 0.20) * 2.2, 256 * 1024 * 1024))
+        if free < rough_need:
+            raise RuntimeError(f"收益预估临时目录空间不足：剩余 {format_bytes(free)}，估计需要 {format_bytes(rough_need)}")
+
+        sample_paths: list[Path] = []
+        input_bytes = 0
+        input_seconds = 0.0
+        av1_bytes = 0
+        av1_seconds = 0.0
+        segment_ratios: list[float] = []
+
+        self.ui_queue.put(("current_text", f"收益预估：{Path(task.input_path).name}"))
+        try:
+            for index, (start, length) in enumerate(specs, start=1):
+                if self.stop_event.is_set():
+                    raise InterruptedError
+                orig_path = self._precheck_sample_path(task, index, "orig")
+                av1_path = self._precheck_sample_path(task, index, "av1")
+                sample_paths.extend([orig_path, av1_path])
+                orig_path.parent.mkdir(parents=True, exist_ok=True)
+                self._safe_unlink(orig_path)
+                self._safe_unlink(av1_path)
+
+                # 1) 源样本：-c copy，只用于得到源文件同位置的实际体积。
+                orig_cmd = self._build_precheck_original_sample_command(task, start, length, orig_path)
+                self.log(f"收益预估源样本命令：{display_command(orig_cmd)}", gui=False)
+                rc, stderr, _ = self._run_ffmpeg_capture(orig_cmd, f"收益预估源样本 {index} {task.input_path}")
+                if rc != 0 or not orig_path.exists() or orig_path.stat().st_size <= 0:
+                    raise RuntimeError(f"源样本 {index} 生成失败：{summarize_ffmpeg_failure(rc, stderr)}")
+
+                # 2) AV1样本：使用正式核心编码策略，比较是否真的有体积收益。
+                av1_cmd = self._build_precheck_av1_sample_command(task, start, length, av1_path)
+                self.log(f"收益预估AV1样本命令：{display_command(av1_cmd)}", gui=False)
+                rc, stderr, _ = self._run_ffmpeg_capture(av1_cmd, f"收益预估AV1样本 {index} {task.input_path}")
+                if rc != 0 or not av1_path.exists() or av1_path.stat().st_size <= 0:
+                    raise RuntimeError(f"AV1样本 {index} 生成失败：{summarize_ffmpeg_failure(rc, stderr)}")
+
+                orig_duration = self._probe_duration_or_default(orig_path, length)
+                av1_duration = self._probe_duration_or_default(av1_path, length)
+                orig_size = orig_path.stat().st_size
+                av1_size = av1_path.stat().st_size
+                input_bytes += orig_size
+                input_seconds += orig_duration
+                av1_bytes += av1_size
+                av1_seconds += av1_duration
+                orig_bps = orig_size / max(orig_duration, 0.001)
+                av1_bps = av1_size / max(av1_duration, 0.001)
+                segment_ratio = av1_bps / max(orig_bps, 1.0)
+                segment_ratios.append(segment_ratio)
+                self.log(
+                    f"收益预估样本 {index}/{len(specs)}：start={start:.1f}s，"
+                    f"源 {format_bytes(orig_size)} / {orig_duration:.2f}s，"
+                    f"AV1 {format_bytes(av1_size)} / {av1_duration:.2f}s，"
+                    f"比例 {segment_ratio:.3f}",
+                    gui=False,
+                )
+
+            input_rate = input_bytes / max(input_seconds, 0.001)
+            av1_rate = av1_bytes / max(av1_seconds, 0.001)
+            ratio = av1_rate / max(input_rate, 1.0)
+            estimated_output = int(task.input_size * ratio)
+            saving_percent = max(0.0, (1.0 - ratio) * 100.0)
+            beneficial_segments = sum(1 for value in segment_ratios if value <= 0.95)
+            majority = (len(segment_ratios) + 1) // 2
+
+            # 只在收益明显不足时跳过，避免误伤“可能只是抽样偏保守”的视频。
+            # 默认阈值 8%，即预计小于 8% 的节省直接归入无收益。
+            should_skip = saving_percent < self.precheck_threshold
+            # 如果总收益刚过线但大多数样本都没明显变小，也认为风险偏高，跳过更符合“省时间”的目的。
+            if not should_skip and beneficial_segments < majority and saving_percent < self.precheck_threshold + 3.0:
+                should_skip = True
+
+            ratio_text = ", ".join(f"{value:.2f}" for value in segment_ratios)
+            detail = (
+                f"样本 {len(segment_ratios)} 段，预计节省 {saving_percent:.1f}% "
+                f"（阈值 {self.precheck_threshold:.1f}%），"
+                f"估算输出 {format_bytes(estimated_output)}，"
+                f"分段比例 [{ratio_text}]"
+            )
+            return should_skip, detail, estimated_output
+        finally:
+            for path in sample_paths:
+                self._safe_unlink(path)
+            # 尽量清理空目录；失败也不影响正式任务。
+            try:
+                self._remove_empty_dirs_under(first_sample.parent, remove_root=False)
+            except Exception:
+                pass
+
     # ---------- 单任务编码 ----------
 
-    # 统一构造失败结果。是否移动到 _压制失败 由 move_eligible 和失败类型共同决定。
     def _failure_result(
         self,
         task: Task,
@@ -1765,7 +2102,6 @@ class AV1CompressorApp:
         task.failure_ffmpeg_command = ffmpeg_command
         return "失败", message
 
-    # 运行正式编码命令，并通过 -progress pipe:1 读取当前文件进度。
     def _run_encoding_command(
         self,
         progress_task: Task,
@@ -1833,7 +2169,6 @@ class AV1CompressorApp:
             self.logger.debug("FFmpeg stderr for %s:\n%s", log_source, stderr_text)
         return return_code, stderr_lines, time.monotonic() - start_time
 
-    # 运行不需要进度条的 FFmpeg 命令，例如无损重封装或完整解码验证。
     def _run_ffmpeg_capture(
         self,
         command: list[str],
@@ -1876,11 +2211,7 @@ class AV1CompressorApp:
             self.logger.debug("FFmpeg stderr for %s:\n%s", log_label, stderr_text)
         return return_code, stderr_lines, time.monotonic() - start_time
 
-    # 构造无损重封装命令：-fflags +genpts + -c copy。
-    # 这一步不重新编码，不损失画质，只尝试修复容器/时间戳问题。
     def _build_remux_retry_command(self, task: Task, remux_path: Path) -> list[str]:
-        # 命令必须使用 list 形式，不能拼接成 shell 字符串。
-        # 这样中文、日文、空格、方括号、感叹号等文件名都能安全传入 FFmpeg。
         command = [
             self.ffmpeg,
             "-hide_banner",
@@ -1891,7 +2222,6 @@ class AV1CompressorApp:
             "-i", task.input_path,
             "-map", f"0:{task.video_index}",
         ]
-        # 显式映射所有音轨，保持多音轨顺序。每条音轨后面再按 AudioPlan 决定 copy 或 Opus。
         for plan in task.audio_plans:
             command += ["-map", f"0:{plan.input_index}"]
         for index in task.subtitle_indexes:
@@ -1921,8 +2251,6 @@ class AV1CompressorApp:
         ]
         return command
 
-    # 重封装后重新探测临时 MKV，并把原 Task 的流索引映射到新容器。
-    # 若音轨/字幕/章节数量变化，说明重封装不安全，必须停止。
     def _task_for_remuxed_input(self, task: Task, remux_path: Path) -> Task:
         probe = self._probe(remux_path)
         streams = probe.get("streams") or []
@@ -1979,7 +2307,6 @@ class AV1CompressorApp:
             cover_indexes=[],
         )
 
-    # 判断失败是否更像环境问题。磁盘满、权限错误等不应把源文件移入 _压制失败。
     def _ffmpeg_error_is_environmental(self, stderr_lines: list[str]) -> bool:
         text = "\n".join(stderr_lines).lower()
         return any(token in text for token in (
@@ -1991,12 +2318,7 @@ class AV1CompressorApp:
             "not enough space",
         ))
 
-    # 处理单个任务的主状态机。
-    # 顺序大致为：检查源文件 -> 查找已有成品 -> 编码 -> 访问冲突自动重封装 -> CFR 回退 -> 验证 -> 归类。
     def _process_task(self, task: Task) -> tuple[str, str]:
-        # 每个任务进入这里时，都先清空上一次失败状态，避免复用旧错误信息。
-        # 后续任何 return 都应通过 _failure_result 或明确的成功/跳过分支，
-        # 这样状态栏、日志、失败说明文件和 state.json 才能保持一致。
         task.failure_move_eligible = False
         task.failure_stage = ""
         task.failure_return_code = None
@@ -2028,9 +2350,6 @@ class AV1CompressorApp:
                         move_eligible=False,
                     )
 
-        # 先检查“预期路径”是否已经有成品。
-        # 这是最快、最可靠的跳过方式：有效且更小则跳过/补移源文件；
-        # 无效则改名保留，避免覆盖用户可能想检查的旧文件。
         if final_path.exists():
             valid, details = self._validate_existing_output(task, final_path)
             if valid:
@@ -2045,12 +2364,33 @@ class AV1CompressorApp:
             except OSError as exc:
                 return self._failure_result(task, f"已有无效输出无法改名：{exc}", stage="已有输出处理", move_eligible=False)
 
-        # 如果预期路径没有成品，再扫描输出目录中可能存在的旧成品。
-        # 旧成品验证会使用来源元数据、快速指纹、文件名和媒体结构多重条件，
-        # 避免把同名但不同内容的视频误判为当前任务的输出。
         legacy_path = self._find_reusable_old_output(task, final_path)
         if legacy_path is not None:
             return self._handle_reusable_output(task, legacy_path, "扫描发现的旧成品")
+
+        if self.precheck_enabled:
+            try:
+                should_skip, estimate_detail, estimated_output = self._estimate_no_gain_before_encoding(task)
+                self.log(f"收益预估结果：{input_path.name}：{estimate_detail}")
+                if should_skip:
+                    if not self._record_no_gain(task, max(estimated_output, 0), record_kind="precheck", detail=estimate_detail):
+                        return self._failure_result(
+                            task,
+                            "收益预估判定无收益，但状态记录写入失败；为安全起见未移动源文件",
+                            stage="收益预估状态写入",
+                            move_eligible=False,
+                        )
+                    move_note = ""
+                    if self.move_no_gain_enabled:
+                        moved, move_detail = self._move_original_to_no_gain(task, max(estimated_output, 0), f"收益预估无压缩收益：{estimate_detail}")
+                        move_note = f"；{move_detail}"
+                        if not moved:
+                            self.log(f"收益预估无收益已记录，但移动源文件失败：{move_detail}", logging.WARNING)
+                    return "无收益", f"收益预估跳过：{estimate_detail}{move_note}"
+            except InterruptedError:
+                raise
+            except Exception as exc:
+                self.log(f"收益预估失败，继续完整压制：{input_path.name}：{exc}", logging.WARNING)
 
         free = shutil.disk_usage(final_path.parent).free
         minimum_free = min(task.input_size + 512 * 1024 * 1024, 8 * 1024 * 1024 * 1024)
@@ -2063,11 +2403,11 @@ class AV1CompressorApp:
         self.log(f"开始编码：{input_path}")
         self.log(f"FFmpeg 命令：{display_command(command)}", gui=False)
 
-        # 两个标记仅用于最后的日志/状态说明：
-        # used_remux_retry 表示曾经因为访问冲突而无损重封装；
-        # used_cfr_retry 表示重封装后仍不稳定，于是重新生成固定帧率时间戳。
         used_remux_retry = False
-        used_cfr_retry = False
+        # retry_source_task 指向“当前实际输入”。
+        # 正常情况下它就是原 task；若自动无损重封装成功，它会指向重封装后的临时 MKV。
+        # 后续 CFR 回退要基于当前实际输入构造命令，不能继续错误地使用已经崩溃的旧命令。
+        retry_source_task: Optional[Task] = None
         try:
             try:
                 return_code, stderr_lines, _ = self._run_encoding_command(task, command, input_path)
@@ -2156,6 +2496,7 @@ class AV1CompressorApp:
 
                 try:
                     retry_task = self._task_for_remuxed_input(task, remux_path)
+                    retry_source_task = retry_task
                 except Exception as exc:
                     return self._failure_result(
                         task,
@@ -2168,7 +2509,6 @@ class AV1CompressorApp:
                         ),
                     )
 
-                # 重封装临时文件通过验证后，仍使用原来的 CRF、Preset、音频策略重新编码。
                 retry_command = self._build_ffmpeg_command(retry_task, temp_path)
                 command_history.append(("重封装后重试编码", retry_command))
                 task.message = "无损重封装完成，正在重新编码"
@@ -2193,64 +2533,57 @@ class AV1CompressorApp:
                         ),
                     )
 
-                if (
-                    return_code != 0
-                    and task.cfr_rate
-                    and not self._ffmpeg_error_is_environmental(stderr_lines)
-                    and not self.stop_event.is_set()
-                ):
-                    # 第二级回退：重封装仍失败时，对明确固定帧率素材重新生成 CFR 时间戳。
-                    # 这只在故障回退链中触发，不影响普通视频的 passthrough 路径。
-                    self._safe_unlink(temp_path)
-                    used_cfr_retry = True
-                    task.message = f"重封装后仍失败，正在尝试 CFR 时间戳规范化（{task.cfr_rate}）"
-                    self._update_task_ui(task)
-                    self.ui_queue.put(("current_text", f"CFR 时间戳规范化重试：{input_path.name}"))
-                    self.log(
-                        f"重封装后重试仍失败，尝试 CFR 时间戳规范化：{input_path.name}；"
-                        f"帧率 {task.cfr_rate}；原因：{task.cfr_reason}",
-                        logging.WARNING,
-                    )
-                    cfr_command = self._build_ffmpeg_command(retry_task, temp_path, cfr_rate=task.cfr_rate)
-                    command_history.append((f"CFR 时间戳规范化重试（-r {task.cfr_rate} -fps_mode cfr）", cfr_command))
-                    self.log(f"CFR 重试 FFmpeg 命令：{display_command(cfr_command)}", gui=False)
-                    try:
-                        return_code, stderr_lines, _ = self._run_encoding_command(
-                            task,
-                            cfr_command,
-                            remux_path,
-                        )
-                    except OSError as exc:
-                        return self._failure_result(
-                            task,
-                            f"CFR 时间戳规范化重试无法启动 FFmpeg：{exc}",
-                            stage="CFR 时间戳规范化重试",
-                            move_eligible=False,
-                            ffmpeg_command="\n\n".join(
-                                f"[{label}]\n{display_command(item)}" for label, item in command_history
-                            ),
-                        )
-
             if self.stop_event.is_set():
                 self._safe_unlink(temp_path)
                 raise InterruptedError
 
+            # 第二级失败回退：CFR 时间戳规范化。
+            #
+            # 背景：有些 MP4/MKV 表面显示为固定 60fps，但实际时间戳有起始偏移、舍入或边界问题。
+            # 默认 passthrough 会尽量保留这些时间戳，个别文件会让 FFmpeg/SVT 在第一批帧上崩溃或卡住。
+            # 如果 ffprobe 判断它是稳定固定帧率，就可以在失败后让 FFmpeg 重新按固定帧率生成输出时间轴。
+            # 这可能造成极少量帧复制/丢弃，所以只作为失败回退，不用于普通成功路径。
+            if return_code != 0 and task.cfr_fallback_rate and not any(label == "CFR 时间戳规范化重试" for label, _ in command_history):
+                self._safe_unlink(temp_path)
+                cfr_task = retry_source_task if retry_source_task is not None else task
+                # 如果重封装后的 task 因容器时间基变化没识别出帧率，沿用原始源文件的 CFR 判定结果。
+                if not cfr_task.cfr_fallback_rate:
+                    cfr_task = replace(cfr_task, cfr_fallback_rate=task.cfr_fallback_rate)
+                cfr_command = self._build_ffmpeg_command(cfr_task, temp_path, fps_mode="cfr")
+                command_history.append(("CFR 时间戳规范化重试", cfr_command))
+                task.message = f"正在尝试 CFR 时间戳规范化回退（{task.cfr_fallback_rate} fps）"
+                self._update_task_ui(task)
+                self.ui_queue.put(("current_text", f"CFR回退：{input_path.name}"))
+                self.log(
+                    f"编码失败后尝试 CFR 时间戳规范化：{input_path.name}，帧率 {task.cfr_fallback_rate}",
+                    logging.WARNING,
+                )
+                self.log(f"CFR 回退 FFmpeg 命令：{display_command(cfr_command)}", gui=False)
+                try:
+                    return_code, stderr_lines, _ = self._run_encoding_command(
+                        task,
+                        cfr_command,
+                        Path(cfr_task.input_path),
+                    )
+                except OSError as exc:
+                    return self._failure_result(
+                        task,
+                        f"CFR 时间戳规范化回退无法启动 FFmpeg：{exc}",
+                        stage="CFR 时间戳规范化回退",
+                        move_eligible=False,
+                        ffmpeg_command="\n\n".join(
+                            f"[{label}]\n{display_command(item)}" for label, item in command_history
+                        ),
+                    )
+
             command_text = "\n\n".join(
                 f"[{label}]\n{display_command(item)}" for label, item in command_history
             )
-            # 所有自动回退都尝试完后，仍然非零才进入真正失败处理。
             if return_code != 0:
                 self._safe_unlink(temp_path)
                 summary = summarize_ffmpeg_failure(return_code, stderr_lines)
-                if used_cfr_retry:
-                    stage = "CFR 时间戳规范化重试"
-                    prefix = "CFR 时间戳规范化重试仍失败"
-                elif used_remux_retry:
-                    stage = "重封装后重试编码"
-                    prefix = "重封装后重试仍失败"
-                else:
-                    stage = "编码"
-                    prefix = "编码失败"
+                stage = "重封装后重试编码" if used_remux_retry else "编码"
+                prefix = "重封装后重试仍失败" if used_remux_retry else "编码失败"
                 self.log(
                     f"{prefix}：{input_path.name}：{summary} | "
                     f"返回码 {format_process_return_code(return_code)}",
@@ -2270,15 +2603,13 @@ class AV1CompressorApp:
                 return self._failure_result(
                     task,
                     "FFmpeg 未生成有效临时文件",
-                    stage="CFR 时间戳规范化输出" if used_cfr_retry else ("重封装后编码输出" if used_remux_retry else "编码输出"),
+                    stage="重封装后编码输出" if used_remux_retry else "编码输出",
                     move_eligible=True,
                     return_code=return_code,
                     ffmpeg_command=command_text,
                 )
 
             self.log(f"编码结束，开始验证：{input_path.name}")
-            # FFmpeg 的 stderr 里经常有 warning/info。
-            # 只有包含错误关键词且不属于时间戳白名单时，才触发更重的完整解码验证。
             suspicious = any(
                 ERROR_WORDS.search(line)
                 and "failed to set thread priority" not in line.lower()
@@ -2300,8 +2631,6 @@ class AV1CompressorApp:
 
             output_size = temp_path.stat().st_size
             task.output_size = output_size
-            # 无收益的判断必须在正式改名之前完成。
-            # 输出不比源文件小时，删除转码产物并记录无收益，必要时移动源文件到 _无压缩收益。
             if output_size >= task.input_size:
                 if not self._record_no_gain(task, output_size):
                     preserved = final_path.with_name(f"{final_path.stem}.no_gain_unrecorded.mkv")
@@ -2348,31 +2677,27 @@ class AV1CompressorApp:
 
             elapsed = time.monotonic() - total_start_time
             saving = 100.0 * (1.0 - output_size / task.input_size)
+            used_cfr_retry = any(label == "CFR 时间戳规范化重试" for label, _ in command_history)
+            retry_note = " | 自动无损重封装后重试成功" if used_remux_retry else ""
             if used_cfr_retry:
-                retry_note = " | 自动无损重封装 + CFR 时间戳规范化后重试成功"
-            elif used_remux_retry:
-                retry_note = " | 自动无损重封装后重试成功"
-            else:
-                retry_note = ""
+                retry_note += " | CFR 时间戳规范化回退成功"
             self.log(
                 f"完成：{input_path.name} -> {final_path.name} | "
                 f"{format_bytes(task.input_size)} -> {format_bytes(output_size)} | "
                 f"节省 {saving:.1f}% | 用时 {format_duration(elapsed)}{retry_note}"
             )
             message = f"节省 {saving:.1f}%"
-            if used_cfr_retry:
-                message += "；自动重封装+CFR后成功"
-            elif used_remux_retry:
+            if used_remux_retry:
                 message += "；自动重封装后成功"
+            if used_cfr_retry:
+                message += "；CFR回退成功"
             if move_detail:
                 message += f"；{move_detail}"
             return "完成", message
         finally:
             self._safe_unlink(remux_path)
 
-    # 构造正式压制命令。
-    # 正常路径使用 fps_mode passthrough；当 cfr_rate 非空时，故障回退使用 -r + fps_mode cfr。
-    def _build_ffmpeg_command(self, task: Task, temp_path: Path, *, cfr_rate: str = "") -> list[str]:
+    def _build_ffmpeg_command(self, task: Task, temp_path: Path, fps_mode: str = "passthrough") -> list[str]:
         command = [
             self.ffmpeg,
             "-hide_banner",
@@ -2403,14 +2728,10 @@ class AV1CompressorApp:
             "-svtav1-params", "tune=0",
             "-pix_fmt", "yuv420p10le",
         ]
-        if cfr_rate:
-            # 故障回退专用：对确认接近固定帧率的源视频重新生成 CFR 时间戳。
-            # 这可以绕过少数 passthrough 时间戳触发的 SVT/FFmpeg 崩溃或 frame=0 卡住问题。
-            command += ["-r:v:0", cfr_rate, "-fps_mode:v:0", "cfr"]
+        if fps_mode == "cfr" and task.cfr_fallback_rate:
+            command += ["-r:v:0", task.cfr_fallback_rate, "-fps_mode:v:0", "cfr"]
         else:
-            # 正常路径：尽量保持源视频帧时间戳，不主动复制/丢帧。
             command += ["-fps_mode:v:0", "passthrough"]
-
 
         # 显式传递常见色彩标记；找不到时不乱填。
         color_values = (
@@ -2459,7 +2780,6 @@ class AV1CompressorApp:
         ]
         return command
 
-    # 独立线程读取 FFmpeg stderr，防止管道缓冲区塞满导致子进程卡死。
     def _collect_stderr(self, process: subprocess.Popen[str], target: list[str]) -> None:
         if process.stderr is None:
             return
@@ -2563,7 +2883,6 @@ class AV1CompressorApp:
             if index % 25 == 0 or index == total:
                 self.ui_queue.put(("current_text", f"建立旧成品指纹索引：{index}/{total}"))
 
-    # 查找可复用旧成品：先用工具写入的来源元数据和快速指纹匹配，再谨慎匹配旧命名。
     def _find_reusable_old_output(self, task: Task, expected_path: Path) -> Optional[Path]:
         """
         在编码前查找旧成品。
@@ -2672,7 +2991,6 @@ class AV1CompressorApp:
         self.log(f"编码前发现可复用旧成品：{chosen}（{reason}），将验证后跳过编码。")
         return chosen
 
-    # 已有成品验证通过后的处理：小于源文件则可补移源文件；无收益则记录并删除成品。
     def _handle_reusable_output(self, task: Task, path: Path, source_label: str) -> tuple[str, str]:
         original_output_path = task.output_path
         task.output_path = str(path)
@@ -2712,8 +3030,6 @@ class AV1CompressorApp:
 
     # ---------- 验证 ----------
 
-    # 验证已有输出是否能代表当前源文件。
-    # 这是跳过重复编码和补移原文件的前置保护。
     def _validate_existing_output(self, task: Task, path: Path) -> tuple[bool, str]:
         try:
             if path.stat().st_size <= 0:
@@ -2728,7 +3044,6 @@ class AV1CompressorApp:
         except Exception as exc:
             return False, str(exc)
 
-    # 验证新生成或已有的 MKV：编码格式、分辨率、时长、音轨、字幕、章节、HDR 等。
     def _validate_output(
         self,
         task: Task,
@@ -2822,8 +3137,6 @@ class AV1CompressorApp:
 
         return True, "验证通过"
 
-    # 完整解码验证只在可疑时运行。
-    # 普通时间戳警告会被白名单忽略，真实解码错误才判失败。
     def _full_decode_verify(self, path: Path) -> tuple[bool, str]:
         command = [
             self.ffmpeg,
@@ -2902,7 +3215,6 @@ class AV1CompressorApp:
             for plan in task.audio_plans
         ]
 
-    # 读取无收益记录。无收益输出会被删除，所以必须靠状态文件防止下次重复压制。
     def _load_no_gain_records(self) -> dict[str, dict[str, Any]]:
         if not STATE_PATH.exists():
             return {}
@@ -2917,7 +3229,6 @@ class AV1CompressorApp:
             return {}
         return {str(key): value for key, value in raw.items() if isinstance(value, dict)}
 
-    # 判断当前源文件是否命中历史无收益记录：路径/大小/mtime/指纹/策略都要匹配。
     def _matching_no_gain_record(self, task: Task) -> Optional[dict[str, Any]]:
         key = self._state_record_key(task.input_path)
         record = self.no_gain_records.get(key)
@@ -2941,14 +3252,18 @@ class AV1CompressorApp:
             and record.get("crf") == task.crf
             and record.get("audio_policy") == self._audio_policy_signature(task)
         )
+        if expected and record.get("record_kind") == "precheck":
+            expected = (
+                self.precheck_enabled
+                and parse_float(record.get("precheck_min_saving_percent"), -1.0) == self.precheck_threshold
+            )
         if expected:
             return record
         self.no_gain_records.pop(key, None)
         self.log(f"无收益记录已失效，将重新处理：{Path(task.input_path).name}", gui=False)
         return None
 
-    # 记录无收益状态。必须先写入成功，再删除无收益输出，避免崩溃后丢记录。
-    def _record_no_gain(self, task: Task, output_size: int) -> bool:
+    def _record_no_gain(self, task: Task, output_size: int, record_kind: str = "actual", detail: str = "") -> bool:
         key = self._state_record_key(task.input_path)
         self.no_gain_records[key] = {
             "input_path": str(Path(task.input_path).resolve(strict=False)),
@@ -2961,6 +3276,9 @@ class AV1CompressorApp:
             "audio_policy": self._audio_policy_signature(task),
             "output_path": str(Path(task.output_path).resolve(strict=False)),
             "output_size": int(output_size),
+            "record_kind": record_kind,
+            "detail": detail,
+            "precheck_min_saving_percent": self.precheck_threshold if record_kind == "precheck" else None,
             "recorded_at": datetime.now().isoformat(timespec="seconds"),
         }
         try:
@@ -2971,7 +3289,6 @@ class AV1CompressorApp:
             self.no_gain_records.pop(key, None)
             return False
 
-    # 如果异常退出留下无收益输出，只有尺寸与记录一致并验证安全时才清理。
     def _cleanup_recorded_no_gain_output(self, task: Task, record: dict[str, Any]) -> None:
         recorded_path = Path(str(record.get("output_path", task.output_path)))
         processing_path = recorded_path.with_name(f"{recorded_path.stem}.__processing__.mkv")
@@ -3001,7 +3318,6 @@ class AV1CompressorApp:
             except OSError as exc:
                 self.log(f"无法删除无收益残留输出：{candidate}：{exc}", logging.WARNING)
 
-    # 成功且输出更小时，将源文件移入 _待删除原文件，等待用户人工确认删除。
     def _move_original_to_pending(self, task: Task) -> tuple[bool, str]:
         source = Path(task.input_path)
         if not source.exists():
@@ -3025,7 +3341,6 @@ class AV1CompressorApp:
         except Exception as exc:
             return False, f"移动原文件失败：{exc}"
 
-    # 无收益时移动的是源文件，不保留更大的转码产物，并写 no_gain 说明。
     def _move_original_to_no_gain(self, task: Task, output_size: int, reason: str) -> tuple[bool, str]:
         source = Path(task.input_path)
         if not source.exists():
@@ -3074,7 +3389,6 @@ class AV1CompressorApp:
         except Exception as exc:
             return False, f"移动无收益源文件失败：{exc}"
 
-    # 确认编码/验证失败时，把源文件移入 _压制失败，并写 failure 说明文件。
     def _move_original_to_failed(self, task: Task) -> tuple[bool, str]:
         source = Path(task.input_path)
         if not source.exists():
@@ -3128,10 +3442,9 @@ class AV1CompressorApp:
     def _save_current_state(self, active: bool) -> None:
         if self.current_state_context is None:
             raise RuntimeError("当前没有可保存的任务上下文")
-        sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text = self.current_state_context
-        self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, active)
+        sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, precheck_enabled = self.current_state_context
+        self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, precheck_enabled, active)
 
-    # 保存状态文件。active=True 表示有可恢复任务；无收益记录始终保留。
     def _save_state(
         self,
         sources: list[InputSource],
@@ -3142,6 +3455,7 @@ class AV1CompressorApp:
         move_failed: bool,
         move_no_gain: bool,
         temp_dir_text: str,
+        precheck_enabled: bool,
         active: bool,
     ) -> None:
         data = {
@@ -3156,13 +3470,13 @@ class AV1CompressorApp:
             "move_failed": move_failed,
             "move_no_gain": move_no_gain,
             "temp_dir": temp_dir_text,
+            "precheck_enabled": precheck_enabled,
             "policy_version": ENCODING_POLICY_VERSION,
             "no_gain_records": self.no_gain_records,
             "tasks": [task.to_json() for task in self.tasks],
         }
         atomic_write_json(STATE_PATH, data)
 
-    # 程序启动后询问是否恢复上次未完成任务。
     def _offer_recovery(self) -> None:
         if not STATE_PATH.exists():
             return
@@ -3204,6 +3518,7 @@ class AV1CompressorApp:
         self.move_failed_var.set(bool(data.get("move_failed", True)))
         self.move_no_gain_var.set(bool(data.get("move_no_gain", True)))
         self.temp_dir_var.set(str(data.get("temp_dir", "")))
+        self.precheck_var.set(bool(data.get("precheck_enabled", self.settings.get("precheck_enabled", False))))
         self.log("已恢复上次输入、输出和原文件处理设置；点击“开始压制”即可重新扫描并继续。")
 
     # ---------- GUI 事件队列 ----------
@@ -3214,7 +3529,6 @@ class AV1CompressorApp:
     def _update_task_ui(self, task: Task) -> None:
         self.ui_queue.put(("update_task", task))
 
-    # 根据 FFmpeg progress 输出刷新当前文件进度和整体加权进度。
     def _update_encoding_progress(
         self,
         task: Task,
@@ -3242,7 +3556,6 @@ class AV1CompressorApp:
             (total_fraction, self.completed_count, len(self.tasks), overall_eta, speed, current_eta),
         ))
 
-    # 主线程定期处理后台线程投递的 UI 更新事件。
     def _drain_ui_queue(self) -> None:
         try:
             while True:
@@ -3315,7 +3628,6 @@ class AV1CompressorApp:
         finally:
             self.root.after(100, self._drain_ui_queue)
 
-    # 任务列表中的音频列摘要，故意很短，避免占用横向空间。
     def _audio_summary(self, task: Task) -> str:
         if not task.audio_plans:
             return "无音频"
@@ -3331,7 +3643,6 @@ class AV1CompressorApp:
         self.optional_button.configure(state=tk.NORMAL)
         self.worker = None
 
-    # 删除文件的安全封装：不存在或删除失败都不会让主流程崩溃。
     def _safe_unlink(self, path: Path) -> None:
         try:
             if path.exists():
@@ -3339,13 +3650,13 @@ class AV1CompressorApp:
         except OSError:
             self.logger.exception("删除文件失败：%s", path)
 
-    # 关闭窗口时若正在编码，先询问并终止当前进程，保存可恢复状态。
     def _on_close(self) -> None:
         if self.running:
             if not messagebox.askyesno("退出", "当前任务仍在运行。确定停止并退出吗？"):
                 return
             self.stop_event.set()
             self._terminate_current_process()
+        self._persist_settings()
         self.logger.info("程序关闭")
         self.root.destroy()
 
@@ -3373,7 +3684,7 @@ def main() -> int:
             "info",
             "首次运行",
             f"已在脚本目录生成配置模板：\n{CONFIG_PATH}\n\n"
-            "请填写 ffmpeg_path 和 ffprobe_path 后重新运行。",
+            "请填写 ffmpeg_path 和 ffprobe_path 后重新运行；后续软件偏好也会保存在这个 JSON 中。",
         )
         return 0
 
