@@ -850,6 +850,13 @@ class AV1CompressorApp:
         self.root.title(APP_STEM)
         self.root.geometry("780x920")
         self.root.minsize(780, 620)
+        # 主界面的横向布局是按 780 像素精心压缩过的：
+        # - 文件名允许换行；
+        # - 任务表可横向滚动；
+        # - “音频”等短列已收窄。
+        # 因此不允许用户横向拉伸，避免列宽和进度详情再次被拉出不可控状态；
+        # 只允许上下拉伸，方便查看更多任务和日志。
+        self.root.resizable(False, True)
 
         main = ttk.Frame(self.root, padding=10)
         main.pack(fill=tk.BOTH, expand=True)
