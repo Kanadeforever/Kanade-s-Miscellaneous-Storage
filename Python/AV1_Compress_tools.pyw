@@ -12,10 +12,25 @@ AV1 压制工具
 - 当前文件进度、总体加权进度、速度和预计剩余时间
 - 启动检查、安全临时输出、完成验证、可疑文件完整解码验证
 - 队列状态恢复、无压缩收益持久记录、快速内容指纹、同目录滚动日志
+- 无压缩收益时可将源文件移入“_无压缩收益”，并生成说明
 - 成功且体积变小时可将原文件移入“_待删除原文件”
+- FFmpeg 发生 0xC0000005 访问冲突时，在临时工作目录无损重封装后重试一次
+- 编码或验证确认为失败时可将源文件移入“_压制失败”，并生成失败说明
 - 首次运行自动生成同名 JSON 配置模板
 
 依赖：Python 3.10+（通常自带 tkinter）、FFmpeg、ffprobe。
+
+代码阅读说明：
+1. 本脚本尽量保持“单文件工具”形态，便于复制、备份和直接运行。
+2. GUI 只在主线程中更新；耗时的扫描、探测和压制工作放在后台线程。
+3. 后台线程不能直接操作 Tkinter 控件，因此所有界面刷新都通过 ui_queue 投递。
+4. FFmpeg 命令全部用 subprocess 的“参数列表”调用，不使用 shell 字符串，避免中文、日文、空格和特殊符号路径被错误解释。
+5. 输出文件一律先写入 .__processing__.mkv，验证通过后再改名为正式文件，防止中断后留下伪完成文件。
+6. 状态文件 .state.json 采用原子写入；无收益记录先落盘，再删除无收益输出，避免重启后重复压制。
+7. 快速内容指纹不是完整哈希，而是稀疏抽样，用于在成品改名或移动后仍能识别来源。
+8. 正常编码优先保持源时间戳 passthrough；只有故障回退时才尝试无损重封装和 CFR 时间戳规范化。
+9. “_待删除原文件”“_无压缩收益”“_压制失败”“_压制临时文件”均会被扫描逻辑排除，避免递归处理归档目录。
+10. 下面的中文注释偏多，是为了方便以后继续维护脚本；功能逻辑本身仍保持自动化和少配置。
 """
 
 from __future__ import annotations
@@ -35,7 +50,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from fractions import Fraction
 from typing import Any, Iterable, Optional
@@ -47,6 +62,11 @@ from tkinter.scrolledtext import ScrolledText
 
 # ----------------------------- 基本路径与常量 -----------------------------
 
+# 重要约定：
+# - 脚本同名 JSON 存放 FFmpeg/ffprobe 路径，首次运行不存在时自动生成模板。
+# - 脚本同名 log 保存完整技术日志；界面日志只显示适合人看的摘要。
+# - 脚本同名 state.json 保存恢复队列、无收益记录和部分设置。
+# - 所有这些文件都放在脚本所在目录，便于把整个工具文件夹搬走。
 SCRIPT_PATH = Path(sys.argv[0]).resolve()
 SCRIPT_DIR = SCRIPT_PATH.parent
 APP_STEM = SCRIPT_PATH.stem
@@ -54,24 +74,35 @@ CONFIG_PATH = SCRIPT_DIR / f"{APP_STEM}.json"
 LOG_PATH = SCRIPT_DIR / f"{APP_STEM}.log"
 STATE_PATH = SCRIPT_DIR / f"{APP_STEM}.state.json"
 
+# 状态文件结构版本。只要字段结构仍兼容，就不要随便递增，避免中断任务无法恢复。
 STATE_SCHEMA_VERSION = 2
+# 编码策略版本。若 CRF 表、音频策略、Preset 等影响输出结果的规则改变，应递增或改名。
 ENCODING_POLICY_VERSION = "av1-svt-p5-pixel-crf-opus-128-192-v2-old-output-scan"
+# 快速指纹版本。改变抽样算法时应改版本，避免旧指纹被误认为同一算法结果。
 QUICK_FINGERPRINT_VERSION = "sha256-sparse-v1"
+# 每个抽样点读取的大小；默认 256 KiB，5 个点约 1.25 MiB，兼顾速度与可靠性。
 QUICK_FINGERPRINT_CHUNK_SIZE = 256 * 1024
 QUICK_FINGERPRINT_SAMPLE_COUNT = 5
+# 三类源文件归档目录：成功但待人工删除、确认失败、转码无收益。
 PENDING_DELETE_DIRNAME = "_待删除原文件"
+FAILED_DIRNAME = "_压制失败"
+NO_GAIN_DIRNAME = "_无压缩收益"
+TEMP_WORK_DIRNAME = "_压制临时文件"
 
+# 配置文件只保存依赖路径，不暴露大量编码参数，保持工具简单。
 CONFIG_TEMPLATE = {
     "ffmpeg_path": "",
     "ffprobe_path": ""
 }
 
+# 扫描文件夹时只处理这些常见视频扩展名。
 VIDEO_EXTENSIONS = {
     ".3gp", ".asf", ".avi", ".flv", ".m2ts", ".m4v", ".mkv", ".mov",
     ".mp4", ".mpeg", ".mpg", ".mts", ".ogm", ".rm", ".rmvb", ".ts",
     ".vob", ".webm", ".wmv"
 }
 
+# 识别无损音频：无损源默认给 Opus 192k，而不是 128k。
 LOSSLESS_AUDIO_CODECS = {
     "alac", "ape", "flac", "mlp", "pcm_alaw", "pcm_bluray", "pcm_dvd",
     "pcm_f16le", "pcm_f24le", "pcm_f32be", "pcm_f32le", "pcm_f64be",
@@ -83,9 +114,11 @@ LOSSLESS_AUDIO_CODECS = {
     "pcm_u8", "shorten", "tak", "truehd", "tta", "wavpack"
 }
 
+# 某些文本字幕在 MKV 中更适合转成 SRT；图片字幕和复杂 ASS/SSA 默认复制。
 TEXT_SUBTITLE_TO_SRT = {"mov_text", "text", "tx3g", "webvtt"}
 
 INVALID_SUFFIX_CHARS = re.compile(r'[<>:"/\\|?*]')
+# 完整解码验证时，stderr 中出现这些词才视为真正可疑；普通时间戳警告单独白名单处理。
 ERROR_WORDS = re.compile(
     r"\b(error|invalid|corrupt|failed|non[- ]monoton(?:ous|ically)|decode_slice_header)\b",
     re.IGNORECASE,
@@ -104,12 +137,22 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 @dataclass
 class InputSource:
+    """用户添加的输入来源。
+
+    path 是文件或文件夹路径；kind 用于区分单文件和目录扫描。
+    文件夹输入会以该文件夹作为相对路径根，输出目录中保持子目录结构。
+    """
     path: str
     kind: str  # "file" 或 "dir"
 
 
 @dataclass
 class AudioPlan:
+    """单条音频流的处理计划。
+
+    脚本先用 ffprobe 分析每条音轨，再决定复制已有低码率 Opus，
+    还是转成 Opus 128k/192k。后续生成 FFmpeg 命令时只读取这个计划。
+    """
     input_index: int
     codec: str
     channels: int
@@ -122,6 +165,14 @@ class AudioPlan:
 
 @dataclass
 class Task:
+    """一个待处理视频的完整任务描述。
+
+    Task 是后台线程和 GUI 之间传递的核心对象：
+    - input/output 路径说明源文件和目标文件；
+    - width/height/fps/crf/audio_plans 说明自动选择的编码策略；
+    - fingerprint/mtime/size 用于恢复、无收益记录和旧成品匹配；
+    - failure_* 字段用于生成失败说明文件。
+    """
     input_path: str
     output_path: str
     source_root: str
@@ -138,6 +189,8 @@ class Task:
     video_index: int
     video_codec: str
     pix_fmt: str
+    cfr_rate: str = ""
+    cfr_reason: str = ""
     rotation: int = 0
     color_primaries: str = ""
     color_transfer: str = ""
@@ -158,6 +211,12 @@ class Task:
     status: str = "等待"
     message: str = ""
     output_size: int = 0
+    failure_move_eligible: bool = False
+    failure_stage: str = ""
+    failure_return_code: Optional[int] = None
+    failure_moved_to: str = ""
+    failure_error: str = ""
+    failure_ffmpeg_command: str = ""
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
@@ -166,12 +225,16 @@ class Task:
 
 # ----------------------------- 通用辅助函数 -----------------------------
 
+# 原子写 JSON：先写临时文件，再 os.replace。
+# 这样即使程序在写状态文件时崩溃，也不会留下半截 JSON。
 def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     temp = path.with_name(path.name + ".tmp")
     temp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temp, path)
 
 
+# 快速内容指纹用于“识别同一源视频”，不是加密级完整校验。
+# 它比全文件 SHA-256 快很多，适合大量视频扫描时使用。
 def quick_content_fingerprint(path: Path, size: Optional[int] = None) -> str:
     """
     计算快速内容指纹。
@@ -212,14 +275,20 @@ def quick_content_fingerprint(path: Path, size: Optional[int] = None) -> str:
     return hasher.hexdigest()
 
 
+# FFmpeg 经常输出时间戳警告；播放器和成品文件可能仍完全可用。
+# 这些白名单警告不会触发“完整解码失败”。
 def is_benign_timestamp_message(line: str) -> bool:
     return any(pattern.search(line) for pattern in BENIGN_TIMESTAMP_PATTERNS)
 
 
+# 首次运行没有同名 JSON 时，只生成模板并退出。
+# 按用户要求，不从 PATH 猜测 ffmpeg，避免工具悄悄使用了错误版本。
 def generate_config_template() -> None:
     atomic_write_json(CONFIG_PATH, CONFIG_TEMPLATE)
 
 
+# 加载用户填写的 ffmpeg/ffprobe 路径，并统一解析为绝对路径。
+# 支持绝对路径，也支持相对于脚本目录的路径。
 def load_config() -> dict[str, str]:
     try:
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -244,6 +313,9 @@ def load_config() -> dict[str, str]:
     }
 
 
+# 将 JSON 中的路径解析为实际路径：
+# - 绝对路径原样使用；
+# - 相对路径以脚本目录为基准。
 def resolve_dependency_path(value: str) -> Path:
     candidate = Path(value).expanduser()
     if not candidate.is_absolute():
@@ -254,6 +326,7 @@ def resolve_dependency_path(value: str) -> Path:
     return candidate
 
 
+# Windows 下隐藏 FFmpeg 控制台窗口；其他系统返回空参数。
 def subprocess_options() -> dict[str, Any]:
     options: dict[str, Any] = {}
     if os.name == "nt":
@@ -261,6 +334,7 @@ def subprocess_options() -> dict[str, Any]:
     return options
 
 
+# 把字节数格式化为 KiB/MiB/GiB，供 GUI 和日志显示。
 def format_bytes(value: int) -> str:
     size = float(max(value, 0))
     units = ["B", "KB", "MB", "GB", "TB"]
@@ -271,6 +345,7 @@ def format_bytes(value: int) -> str:
     return f"{size:.2f} TB"
 
 
+# 把秒数格式化为 00:00:00；未知时返回 --:--:--。
 def format_duration(seconds: Optional[float]) -> str:
     if seconds is None or not math.isfinite(seconds) or seconds < 0:
         return "--:--:--"
@@ -280,6 +355,7 @@ def format_duration(seconds: Optional[float]) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+# ffprobe 常返回 60000/1001 这种分数字符串；这里转成浮点便于比较。
 def parse_fraction(value: Any) -> float:
     if value in (None, "", "0/0", "N/A"):
         return 0.0
@@ -290,6 +366,76 @@ def parse_fraction(value: Any) -> float:
             return float(value)
         except (TypeError, ValueError):
             return 0.0
+
+
+# 精确解析帧率分数。CFR 回退需要保留 30000/1001 这类标准分数。
+def parse_fraction_exact(value: Any) -> Optional[Fraction]:
+    if value in (None, "", "0/0", "N/A"):
+        return None
+    try:
+        fraction = Fraction(str(value))
+    except (ValueError, ZeroDivisionError):
+        try:
+            fraction = Fraction(float(value)).limit_denominator(1001000)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if fraction <= 0:
+        return None
+    return fraction
+
+
+def format_fraction_for_ffmpeg(value: Fraction) -> str:
+    value = value.limit_denominator(1001000)
+    return str(value.numerator) if value.denominator == 1 else f"{value.numerator}/{value.denominator}"
+
+
+def relative_fraction_error(left: Fraction, right: Fraction) -> float:
+    if left <= 0 or right <= 0:
+        return float("inf")
+    return abs(float(left - right)) / max(float(left), float(right))
+
+
+# CFR 回退帧率判定。
+# 只有在源视频看起来确实是固定帧率时，才允许故障后用 -r + fps_mode cfr 重试。
+# 这样可以修复时间戳异常，又尽量不影响真正的 VFR 视频。
+def choose_cfr_retry_rate(video: dict[str, Any]) -> tuple[str, str]:
+    """Return an FFmpeg -r value for safe CFR retry, or ("", reason).
+
+    This is only used after passthrough encoding and remux retry have failed.
+    It intentionally accepts only clearly stable, common frame rates.
+    """
+    avg = parse_fraction_exact(video.get("avg_frame_rate"))
+    nominal = parse_fraction_exact(video.get("r_frame_rate"))
+    rate = avg or nominal
+    if rate is None:
+        return "", "无法取得稳定帧率"
+
+    if nominal is not None and avg is not None and relative_fraction_error(avg, nominal) > 0.001:
+        return "", f"avg_frame_rate 与 r_frame_rate 差异较大：{format_fraction_for_ffmpeg(avg)} vs {format_fraction_for_ffmpeg(nominal)}"
+
+    fps = float(rate)
+    if fps < 5.0 or fps > 240.0:
+        return "", f"帧率不在自动 CFR 回退范围内：{fps:.3f}"
+
+    common_rates = [
+        Fraction(24000, 1001), Fraction(24, 1), Fraction(25, 1),
+        Fraction(30000, 1001), Fraction(30, 1), Fraction(50, 1),
+        Fraction(60000, 1001), Fraction(60, 1), Fraction(100, 1),
+        Fraction(120000, 1001), Fraction(120, 1),
+    ]
+    closest = min(common_rates, key=lambda item: relative_fraction_error(rate, item))
+    if relative_fraction_error(rate, closest) <= 0.001:
+        return format_fraction_for_ffmpeg(closest), f"稳定常见帧率 {float(closest):.3f} fps"
+
+    # 有些站点会使用整数以外但仍很稳定的帧率；如果帧数和时长匹配，允许回退。
+    nb_frames = parse_int(video.get("nb_frames"), 0)
+    duration = parse_float(video.get("duration"), 0.0)
+    if nb_frames > 0 and duration > 0:
+        counted = Fraction(nb_frames, 1) / Fraction(str(duration))
+        if relative_fraction_error(rate, counted) <= 0.002:
+            return format_fraction_for_ffmpeg(rate), f"帧数/时长匹配的稳定帧率 {fps:.3f} fps"
+
+    return "", f"不是常见稳定帧率：{fps:.3f}"
 
 
 def parse_int(value: Any, default: int = 0) -> int:
@@ -324,6 +470,43 @@ def display_command(args: list[str]) -> str:
     return shlex.join(args)
 
 
+def format_process_return_code(return_code: int) -> str:
+    unsigned = return_code & 0xFFFFFFFF
+    if unsigned == 0xC0000005:
+        return f"{return_code} / 0xC0000005（访问冲突）"
+    return f"{return_code} / 0x{unsigned:08X}" if return_code != 0 else "0"
+
+
+# 从 FFmpeg stderr 中提取“人能看懂”的错误摘要。
+# 访问冲突等崩溃没有正常 error 行，因此必须结合返回码判断。
+def summarize_ffmpeg_failure(return_code: int, stderr_lines: list[str]) -> str:
+    unsigned = return_code & 0xFFFFFFFF
+    if unsigned == 0xC0000005:
+        return "FFmpeg 异常崩溃：0xC0000005（访问冲突）"
+
+    meaningful: list[str] = []
+    keywords = re.compile(
+        r"(error|failed|invalid|cannot|could not|denied|no space|memory|malloc|abort|exception|corrupt)",
+        re.IGNORECASE,
+    )
+    for line in stderr_lines:
+        stripped = line.strip()
+        if not stripped or stripped.lower().startswith("svt[info]"):
+            continue
+        if keywords.search(stripped):
+            meaningful.append(stripped)
+    if meaningful:
+        return f"FFmpeg 返回码 {format_process_return_code(return_code)}：" + " | ".join(meaningful[-8:])[-1500:]
+
+    non_info = [
+        line.strip() for line in stderr_lines
+        if line.strip() and not line.strip().lower().startswith("svt[info]")
+    ]
+    if non_info:
+        return f"FFmpeg 返回码 {format_process_return_code(return_code)}：" + " | ".join(non_info[-12:])[-1500:]
+    return f"FFmpeg 异常退出，返回码 {format_process_return_code(return_code)}；未输出明确错误信息"
+
+
 def is_relative_to(path: Path, parent: Path) -> bool:
     try:
         path.resolve().relative_to(parent.resolve())
@@ -344,6 +527,8 @@ def unique_path(path: Path, reserved: set[str]) -> Path:
     return candidate
 
 
+# 根据每帧像素总数、HDR 和高帧率自动选择 CRF。
+# 这里不看横竖屏，只看 width*height，因此 1080x1920 和 1920x1080 同档。
 def choose_crf(pixels: int, hdr_type: str, fps: float) -> int:
     if pixels <= 600_000:
         crf = 24
@@ -379,6 +564,7 @@ def infer_bit_depth(stream: dict[str, Any]) -> int:
     return 8
 
 
+# 粗略识别 HDR10/HLG。Dolby Vision 另有专门检测，默认跳过以避免破坏动态元数据。
 def detect_hdr_type(video: dict[str, Any]) -> str:
     transfer = str(video.get("color_transfer", "")).lower()
     if transfer == "smpte2084":
@@ -426,6 +612,8 @@ def get_rotation(video: dict[str, Any]) -> int:
     return 0
 
 
+# 音频策略：已有合适 Opus 尽量复制；普通有损低码率用 128k；
+# 无损、高码率或未知信息用 192k，避免过度压缩。
 def audio_plan_for_stream(stream: dict[str, Any]) -> AudioPlan:
     codec = str(stream.get("codec_name", "unknown")).lower()
     channels = parse_int(stream.get("channels"), 0)
@@ -476,6 +664,7 @@ def audio_plan_for_stream(stream: dict[str, Any]) -> AudioPlan:
     )
 
 
+# 尽量从 format.duration 获取总时长，失败时退回各流 duration 的最大值。
 def get_duration(probe: dict[str, Any], main_video: dict[str, Any]) -> float:
     duration = parse_float((probe.get("format") or {}).get("duration"), 0.0)
     if duration > 0:
@@ -489,7 +678,20 @@ def get_duration(probe: dict[str, Any], main_video: dict[str, Any]) -> float:
 
 # ----------------------------- 主程序 -----------------------------
 
+# 维护指南：
+# 1. 如果只改 GUI 文案或布局，通常不需要改 ENCODING_POLICY_VERSION。
+# 2. 如果改了 CRF 表、Preset、音频码率、是否 CFR 默认启用等，会影响输出结果，应修改 ENCODING_POLICY_VERSION。
+# 3. 如果改了 state.json 字段结构且不兼容旧状态，应递增 STATE_SCHEMA_VERSION。
+# 4. 如果改了快速指纹抽样方式，应修改 QUICK_FINGERPRINT_VERSION。
+# 5. 不要把 FFmpeg 命令改成字符串加 shell=True；那会让非 ASCII 路径和特殊字符更容易出错。
+# 6. 任何会删除或移动源文件的逻辑，都应先完成输出验证或状态写入。
+# 7. 新增失败回退时要限制触发条件和次数，避免同一个坏文件无限重试。
+# 8. Tkinter 控件只能在主线程更新；后台线程新增 UI 更新时，请通过 self.ui_queue。
+# 9. 新增扫描目录时，记得排除四个内部目录，防止处理自己的归档/临时文件。
+# 10. 新增容器或字幕处理规则时，优先保证“不静默丢流”，宁可跳过也不要悄悄损坏归档。
 class AV1CompressorApp:
+    # 初始化应用状态。
+    # 注意：Tkinter 控件只在主线程创建和更新；后台线程通过 ui_queue 与主线程通信。
     def __init__(self, root: tk.Tk, config: dict[str, str]) -> None:
         self.root = root
         self.ffmpeg = config["ffmpeg_path"]
@@ -509,7 +711,11 @@ class AV1CompressorApp:
         self.completed_count = 0
         self.running = False
         self.move_original_enabled = True
-        self.current_state_context: Optional[tuple[list[InputSource], Path, str, bool, bool]] = None
+        self.move_failed_enabled = True
+        self.move_no_gain_enabled = True
+        self.custom_temp_root: Optional[Path] = None
+        self.options_window: Optional[tk.Toplevel] = None
+        self.current_state_context: Optional[tuple[list[InputSource], Path, str, bool, bool, bool, bool, str]] = None
         self.existing_output_files: list[Path] = []
         self.existing_output_name_index: dict[str, list[Path]] = {}
         self.existing_output_probe_cache: dict[str, dict[str, Any]] = {}
@@ -527,6 +733,7 @@ class AV1CompressorApp:
 
     # ---------- 日志 ----------
 
+    # 创建滚动日志。完整 FFmpeg 命令、stderr、失败原因都会写到这里，方便排查。
     def _create_logger(self) -> logging.Logger:
         logger = logging.getLogger(f"{APP_STEM}-{id(self)}")
         logger.setLevel(logging.DEBUG)
@@ -546,6 +753,7 @@ class AV1CompressorApp:
         logger.info("程序启动：%s", SCRIPT_PATH)
         return logger
 
+    # 同时写文件日志和界面日志；gui=False 时只写文件，避免界面刷屏。
     def log(self, text: str, level: int = logging.INFO, gui: bool = True) -> None:
         self.logger.log(level, text)
         if gui:
@@ -553,10 +761,12 @@ class AV1CompressorApp:
 
     # ---------- GUI ----------
 
+    # 构建主界面。主窗口固定宽度，允许纵向拉伸，避免长文件名把控件挤乱。
     def _build_ui(self) -> None:
         self.root.title(APP_STEM)
-        self.root.geometry("940x720")
+        self.root.geometry("780x920")
         self.root.minsize(780, 620)
+        self.root.resizable(False, True)
 
         main = ttk.Frame(self.root, padding=10)
         main.pack(fill=tk.BOTH, expand=True)
@@ -589,19 +799,19 @@ class AV1CompressorApp:
         ttk.Entry(output_frame, textvariable=self.output_var).grid(row=0, column=1, sticky="ew", padx=6)
         ttk.Button(output_frame, text="选择", command=self._choose_output).grid(row=0, column=2)
 
-        ttk.Label(output_frame, text="文件名后缀：").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        # 次要设置保留原变量和状态格式，仅从主界面移入“可选功能”窗口。
         self.suffix_var = tk.StringVar(value="_AV1")
-        ttk.Entry(output_frame, textvariable=self.suffix_var, width=22).grid(row=1, column=1, sticky="w", padx=6, pady=(8, 0))
         self.recursive_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(output_frame, text="扫描子文件夹并保持目录结构", variable=self.recursive_var).grid(
-            row=1, column=2, sticky="e", pady=(8, 0)
-        )
         self.move_original_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
+        self.move_failed_var = tk.BooleanVar(value=True)
+        self.move_no_gain_var = tk.BooleanVar(value=True)
+        self.temp_dir_var = tk.StringVar(value="")
+        self.optional_button = ttk.Button(
             output_frame,
-            text=f"成功且体积变小后，将原视频移入输入根目录的“{PENDING_DELETE_DIRNAME}”",
-            variable=self.move_original_var,
-        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+            text="可选功能",
+            command=self._open_optional_features,
+        )
+        self.optional_button.grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         task_frame = ttk.LabelFrame(main, text="任务", padding=6)
         task_frame.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
@@ -618,7 +828,7 @@ class AV1CompressorApp:
         self.task_tree.column("#0", width=330, minwidth=180, stretch=False)
         self.task_tree.column("resolution", width=105, anchor=tk.CENTER, stretch=False)
         self.task_tree.column("quality", width=115, anchor=tk.CENTER, stretch=False)
-        self.task_tree.column("audio", width=160, anchor=tk.CENTER, stretch=False)
+        self.task_tree.column("audio", width=82, minwidth=70, anchor=tk.CENTER, stretch=False)
         self.task_tree.column("status", width=520, minwidth=220, anchor=tk.W, stretch=False)
         self.task_tree.grid(row=0, column=0, sticky="nsew")
         tree_scroll = ttk.Scrollbar(task_frame, orient=tk.VERTICAL, command=self.task_tree.yview)
@@ -631,17 +841,29 @@ class AV1CompressorApp:
         progress_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         progress_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(progress_frame, text="当前文件：").grid(row=0, column=0, sticky="w")
+        ttk.Label(progress_frame, text="当前文件：").grid(row=0, column=0, sticky="nw")
         self.current_text = tk.StringVar(value="等待开始")
-        ttk.Label(progress_frame, textvariable=self.current_text).grid(row=0, column=1, sticky="w")
+        self.current_label = ttk.Label(progress_frame, textvariable=self.current_text, wraplength=620, justify=tk.LEFT)
+        self.current_label.grid(row=0, column=1, sticky="ew")
+        ttk.Label(progress_frame, text="详细信息：").grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self.current_detail_text = tk.StringVar(value="")
+        self.current_detail_label = ttk.Label(progress_frame, textvariable=self.current_detail_text, wraplength=620, justify=tk.LEFT)
+        self.current_detail_label.grid(row=1, column=1, sticky="ew", pady=(2, 0))
         self.current_progress = ttk.Progressbar(progress_frame, maximum=100)
-        self.current_progress.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 8))
+        self.current_progress.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 8))
 
-        ttk.Label(progress_frame, text="全部任务：").grid(row=2, column=0, sticky="w")
+        ttk.Label(progress_frame, text="全部任务：").grid(row=3, column=0, sticky="w")
         self.overall_text = tk.StringVar(value="0 / 0")
-        ttk.Label(progress_frame, textvariable=self.overall_text).grid(row=2, column=1, sticky="w")
+        ttk.Label(progress_frame, textvariable=self.overall_text).grid(row=3, column=1, sticky="w")
         self.overall_progress = ttk.Progressbar(progress_frame, maximum=100)
-        self.overall_progress.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        self.overall_progress.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+
+        def _sync_progress_wraplength(event: tk.Event) -> None:
+            width = max(int(event.width) - 120, 260)
+            self.current_label.configure(wraplength=width)
+            self.current_detail_label.configure(wraplength=width)
+
+        progress_frame.bind("<Configure>", _sync_progress_wraplength)
 
         button_frame = ttk.Frame(main)
         button_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
@@ -658,6 +880,86 @@ class AV1CompressorApp:
         self.log_text = ScrolledText(log_frame, height=9, wrap=tk.WORD, state=tk.DISABLED)
         self.log_text.grid(row=0, column=0, sticky="nsew")
 
+    # 可选功能窗口：把不常改的设置从主界面移走，让主界面保持简洁。
+    def _open_optional_features(self) -> None:
+        if self.options_window is not None and self.options_window.winfo_exists():
+            self.options_window.deiconify()
+            self.options_window.lift()
+            self.options_window.focus_force()
+            return
+
+        window = tk.Toplevel(self.root)
+        self.options_window = window
+        window.title("可选功能")
+        window.transient(self.root)
+        window.resizable(False, False)
+
+        body = ttk.Frame(window, padding=14)
+        body.pack(fill=tk.BOTH, expand=True)
+        body.columnconfigure(1, weight=1)
+
+        ttk.Label(body, text="文件名后缀：").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        suffix_entry = ttk.Entry(body, textvariable=self.suffix_var, width=28)
+        suffix_entry.grid(row=0, column=1, sticky="ew")
+
+        ttk.Checkbutton(
+            body,
+            text=f"成功且体积变小后，将原视频移入输入根目录的“{PENDING_DELETE_DIRNAME}”",
+            variable=self.move_original_var,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(14, 0))
+
+        ttk.Checkbutton(
+            body,
+            text=f"编码或验证失败后，将源视频移入输入根目录的“{FAILED_DIRNAME}”",
+            variable=self.move_failed_var,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+        ttk.Checkbutton(
+            body,
+            text=f"无压缩收益后，将源视频移入输入根目录的“{NO_GAIN_DIRNAME}”",
+            variable=self.move_no_gain_var,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+        ttk.Checkbutton(
+            body,
+            text="扫描子文件夹并保持目录结构",
+            variable=self.recursive_var,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+        temp_frame = ttk.LabelFrame(body, text="临时工作目录", padding=8)
+        temp_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        temp_frame.columnconfigure(0, weight=1)
+        ttk.Entry(temp_frame, textvariable=self.temp_dir_var, width=54).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ttk.Button(temp_frame, text="选择", command=self._choose_temp_dir).grid(row=0, column=1)
+        ttk.Label(
+            temp_frame,
+            text=f"留空=使用输入根目录下的 {TEMP_WORK_DIRNAME}；自动重封装中间文件会在完成后清理。",
+            foreground="#666666",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        button_row = ttk.Frame(body)
+        button_row.grid(row=6, column=0, columnspan=2, sticky="e", pady=(16, 0))
+
+        def close_window() -> None:
+            try:
+                window.grab_release()
+            except tk.TclError:
+                pass
+            self.options_window = None
+            window.destroy()
+
+        ttk.Button(button_row, text="完成", command=close_window).pack()
+        window.protocol("WM_DELETE_WINDOW", close_window)
+        window.update_idletasks()
+        width = max(680, window.winfo_reqwidth())
+        height = max(390, window.winfo_reqheight())
+        x = self.root.winfo_rootx() + max((self.root.winfo_width() - width) // 2, 0)
+        y = self.root.winfo_rooty() + max((self.root.winfo_height() - height) // 3, 0)
+        window.geometry(f"{width}x{height}+{x}+{y}")
+        window.grab_set()
+        suffix_entry.focus_set()
+
+    # 添加零散视频文件。零散文件输出到输出目录根部。
     def _add_files(self) -> None:
         paths = filedialog.askopenfilenames(
             title="选择视频文件",
@@ -666,6 +968,7 @@ class AV1CompressorApp:
         for value in paths:
             self._add_source(InputSource(str(Path(value).resolve()), "file"))
 
+    # 添加文件夹。扫描时会按此文件夹作为 source_root，输出保持相对路径。
     def _add_folder(self) -> None:
         value = filedialog.askdirectory(title="选择输入文件夹")
         if value:
@@ -694,8 +997,14 @@ class AV1CompressorApp:
         if value:
             self.output_var.set(str(Path(value).resolve()))
 
+    def _choose_temp_dir(self) -> None:
+        value = filedialog.askdirectory(title="选择临时工作目录")
+        if value:
+            self.temp_dir_var.set(str(Path(value).resolve()))
+
     # ---------- 开始 / 停止 ----------
 
+    # 开始按钮入口：读取 GUI 设置，做基础校验，然后启动后台工作线程。
     def _start(self) -> None:
         if self.running:
             return
@@ -723,31 +1032,50 @@ class AV1CompressorApp:
         self.stop_event.clear()
         self.start_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
+        self.optional_button.configure(state=tk.DISABLED)
         self.current_progress["value"] = 0
         self.overall_progress["value"] = 0
         self.current_text.set("正在检查环境……")
+        self.current_detail_text.set("")
         self.overall_text.set("准备任务")
         self.task_tree.delete(*self.task_tree.get_children())
         self.tree_items.clear()
 
+        temp_dir_text = self.temp_dir_var.get().strip()
+        if temp_dir_text:
+            try:
+                temp_dir = self._resolve_temp_dir_text(temp_dir_text)
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                test_file = temp_dir / f".__{APP_STEM}_temp_write_test_{os.getpid()}"
+                test_file.write_bytes(b"ok")
+                test_file.unlink()
+            except OSError as exc:
+                messagebox.showerror("临时目录错误", f"临时工作目录不可写：\n{temp_dir_text}\n\n{exc}")
+                return
+
         sources = [InputSource(item.path, item.kind) for item in self.sources]
         recursive = bool(self.recursive_var.get())
         move_original = bool(self.move_original_var.get())
+        move_failed = bool(self.move_failed_var.get())
+        move_no_gain = bool(self.move_no_gain_var.get())
         self.worker = threading.Thread(
             target=self._worker_main,
-            args=(sources, output_dir, suffix, recursive, move_original),
+            args=(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text),
             daemon=True,
         )
         self.worker.start()
 
+    # 停止按钮只设置停止标记并终止当前 FFmpeg；不会删除源文件或误写成功状态。
     def _stop(self) -> None:
         if not self.running:
             return
         self.stop_event.set()
         self.log("收到停止请求，正在结束当前 FFmpeg 进程……", logging.WARNING)
         self.current_text.set("正在停止……")
+        self.current_detail_text.set("")
         threading.Thread(target=self._terminate_current_process, daemon=True).start()
 
+    # 尝试优雅终止当前 FFmpeg，超时后强制 kill。
     def _terminate_current_process(self) -> None:
         with self.process_lock:
             process = self.current_process
@@ -764,6 +1092,8 @@ class AV1CompressorApp:
 
     # ---------- 后台总流程 ----------
 
+    # 后台主流程：启动检查 -> 清理临时目录 -> 扫描任务 -> 逐个处理 -> 保存状态。
+    # 这个函数运行在工作线程，不能直接操作 Tk 控件。
     def _worker_main(
         self,
         sources: list[InputSource],
@@ -771,11 +1101,18 @@ class AV1CompressorApp:
         suffix: str,
         recursive: bool,
         move_original: bool,
+        move_failed: bool,
+        move_no_gain: bool,
+        temp_dir_text: str,
     ) -> None:
         self.move_original_enabled = move_original
-        self.current_state_context = (sources, output_dir, suffix, recursive, move_original)
+        self.move_failed_enabled = move_failed
+        self.move_no_gain_enabled = move_no_gain
+        self.custom_temp_root = self._resolve_temp_dir_text(temp_dir_text) if temp_dir_text.strip() else None
+        self.current_state_context = (sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text)
         try:
             self._startup_checks(output_dir)
+            self._cleanup_temp_work_dirs(sources)
             if self.stop_event.is_set():
                 raise InterruptedError("用户停止")
 
@@ -789,7 +1126,7 @@ class AV1CompressorApp:
             self.completed_weight = 0.0
             self.completed_count = 0
             self.batch_started_at = time.monotonic()
-            self._save_state(sources, output_dir, suffix, recursive, move_original, active=True)
+            self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, active=True)
 
             for task in tasks:
                 if self.stop_event.is_set():
@@ -805,18 +1142,35 @@ class AV1CompressorApp:
                 task.status = "处理中"
                 task.message = ""
                 self._update_task_ui(task)
-                self._save_state(sources, output_dir, suffix, recursive, move_original, active=True)
+                self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, active=True)
 
                 result_status, message = self._process_task(task)
                 task.status = result_status
                 task.message = message
+
+                if (
+                    result_status == "失败"
+                    and self.move_failed_enabled
+                    and task.failure_move_eligible
+                    and not self.stop_event.is_set()
+                ):
+                    # 先保存失败状态，再移动源文件；异常退出时仍有可追踪记录。
+                    self._save_state(
+                        sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, active=True
+                    )
+                    moved, move_detail = self._move_original_to_failed(task)
+                    if moved:
+                        task.message = f"{task.message}；{move_detail}"
+                    else:
+                        self.log(f"失败已记录，但移动源文件失败：{move_detail}", logging.WARNING)
+
                 self.completed_weight += max(task.weight, 1.0)
                 self.completed_count += 1
                 self._update_task_ui(task)
                 self._update_overall_progress(0.0, 0.0, None)
-                self._save_state(sources, output_dir, suffix, recursive, move_original, active=True)
+                self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, active=True)
 
-            self._save_state(sources, output_dir, suffix, recursive, move_original, active=False)
+            self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, active=False)
             success = sum(1 for t in tasks if t.status == "完成")
             skipped = sum(1 for t in tasks if t.status in {"跳过", "无收益"})
             failed = sum(1 for t in tasks if t.status == "失败")
@@ -827,7 +1181,7 @@ class AV1CompressorApp:
         except InterruptedError:
             self.log("任务已停止；未完成队列会在下次启动时提供恢复。", logging.WARNING)
             try:
-                self._save_state(sources, output_dir, suffix, recursive, move_original, active=True)
+                self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, active=True)
             except Exception:
                 self.logger.exception("保存停止状态失败")
             self.ui_queue.put(("stopped", "任务已停止"))
@@ -835,13 +1189,117 @@ class AV1CompressorApp:
             self.logger.exception("后台任务异常")
             self.log(f"任务中止：{exc}", logging.ERROR)
             try:
-                self._save_state(sources, output_dir, suffix, recursive, move_original, active=True)
+                self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, active=True)
             except Exception:
                 self.logger.exception("保存异常状态失败")
             self.ui_queue.put(("failed", str(exc)))
 
+    # ---------- 临时工作目录 ----------
+
+    # 解析可选功能中的自定义临时目录；留空表示使用输入根目录下的 _压制临时文件。
+    def _resolve_temp_dir_text(self, value: str) -> Path:
+        text = value.strip()
+        if not text:
+            raise ValueError("临时目录为空")
+        path = Path(text).expanduser()
+        if not path.is_absolute():
+            path = SCRIPT_DIR / path
+        return path.resolve(strict=False)
+
+    # 为某个输入根目录选择临时工作目录，避免把重封装中间文件放到最终输出目录。
+    def _temp_root_for_source_path(self, source_root: Path) -> Path:
+        if self.custom_temp_root is not None:
+            return self.custom_temp_root
+        return source_root.resolve(strict=False) / TEMP_WORK_DIRNAME
+
+    # 启动和任务结束时清理遗留临时文件。
+    # 只清理本工具命名的工作目录，不碰用户普通文件。
+    def _cleanup_temp_work_dirs(self, sources: list[InputSource]) -> None:
+        roots: set[Path] = set()
+        if self.custom_temp_root is not None:
+            roots.add(self.custom_temp_root)
+        for source in sources:
+            try:
+                source_path = Path(source.path).resolve(strict=False)
+                root = source_path.parent if source.kind == "file" else source_path
+                roots.add(self._temp_root_for_source_path(root))
+            except OSError:
+                continue
+
+        for root in roots:
+            if not root.exists():
+                continue
+            try:
+                for path in root.rglob("*.__remux_retry__.mkv"):
+                    try:
+                        path.unlink()
+                        self.log(f"清理上次遗留重封装临时文件：{path}", gui=False)
+                    except OSError as exc:
+                        self.log(f"无法清理重封装临时文件：{path}：{exc}", logging.WARNING)
+                self._remove_empty_dirs_under(root, remove_root=(self.custom_temp_root is None and root.name == TEMP_WORK_DIRNAME))
+            except OSError as exc:
+                self.log(f"扫描临时工作目录失败：{root}：{exc}", logging.WARNING)
+
+    def _remove_empty_dirs_under(self, root: Path, remove_root: bool = False) -> None:
+        if not root.exists() or not root.is_dir():
+            return
+        try:
+            dirs = [path for path in root.rglob("*") if path.is_dir()]
+            for directory in sorted(dirs, key=lambda value: len(value.parts), reverse=True):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+            if remove_root:
+                try:
+                    root.rmdir()
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    # 为自动无损重封装生成临时 MKV 路径，路径中包含快速指纹，降低重名风险。
+    def _remux_retry_path_for_task(self, task: Task) -> Path:
+        source_root = Path(task.source_root)
+        temp_root = self._temp_root_for_source_path(source_root)
+        try:
+            relative = Path(task.source_relative)
+        except Exception:
+            relative = Path(Path(task.input_path).name)
+        relative_parent = relative.parent if str(relative.parent) != "." else Path()
+        stem = Path(task.input_path).stem
+        fingerprint = (task.source_fingerprint or "nofp")[:12]
+        name = f"{stem}.{fingerprint}.__remux_retry__.mkv"
+        return temp_root / relative_parent / name
+
+    # 重封装前检查临时目录空间。中间 MKV 接近源文件大小，因此必须先确认磁盘空间。
+    def _prepare_remux_retry_path(self, task: Task, remux_path: Path) -> str:
+        try:
+            remux_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return f"无法创建临时工作目录：{exc}"
+
+        try:
+            free = shutil.disk_usage(remux_path.parent).free
+        except OSError as exc:
+            return f"无法检查临时工作目录剩余空间：{exc}"
+        required = max(int(task.input_size * 1.10), task.input_size + 64 * 1024 * 1024)
+        if free < required:
+            return (
+                f"临时工作目录空间不足：剩余 {format_bytes(free)}，"
+                f"需要约 {format_bytes(required)}"
+            )
+
+        if remux_path.exists():
+            try:
+                remux_path.unlink()
+            except OSError as exc:
+                return f"无法删除遗留重封装临时文件：{exc}"
+        return ""
+
     # ---------- 环境检查 ----------
 
+    # 点击开始后的依赖检查：ffmpeg/ffprobe 是否可用、编码器是否存在、输出目录是否可写。
     def _startup_checks(self, output_dir: Path) -> None:
         self.log("开始启动前检查。")
         for executable, name in ((self.ffmpeg, "FFmpeg"), (self.ffprobe, "ffprobe")):
@@ -918,6 +1376,8 @@ class AV1CompressorApp:
 
     # ---------- 扫描与探测 ----------
 
+    # 扫描输入来源，生成 Task 列表。
+    # 这里会排除 _待删除原文件、_无压缩收益、_压制失败、_压制临时文件。
     def _scan_tasks(
         self,
         sources: list[InputSource],
@@ -939,6 +1399,9 @@ class AV1CompressorApp:
                 root = source_path
                 source_resolved = source_path.resolve()
                 pending_delete_root = source_resolved / PENDING_DELETE_DIRNAME
+                failed_root = source_resolved / FAILED_DIRNAME
+                no_gain_root = source_resolved / NO_GAIN_DIRNAME
+                temp_work_root = self._temp_root_for_source_path(source_resolved)
                 exclude_output_subtree = (
                     output_resolved != source_resolved
                     and is_relative_to(output_resolved, source_resolved)
@@ -958,9 +1421,14 @@ class AV1CompressorApp:
 
                 if exclude_output_subtree and is_relative_to(resolved, output_resolved):
                     continue
-                if source.kind == "dir" and is_relative_to(resolved, pending_delete_root):
+                if source.kind == "dir" and (
+                    is_relative_to(resolved, pending_delete_root)
+                    or is_relative_to(resolved, failed_root)
+                    or is_relative_to(resolved, no_gain_root)
+                    or is_relative_to(resolved, temp_work_root)
+                ):
                     continue
-                if ".__processing__" in resolved.name:
+                if ".__processing__" in resolved.name or ".__remux_retry__" in resolved.name:
                     continue
                 key = os.path.normcase(str(resolved))
                 if key in seen:
@@ -1000,6 +1468,7 @@ class AV1CompressorApp:
             self.source_stem_counts[key] = self.source_stem_counts.get(key, 0) + 1
         return tasks
 
+    # 预扫描输出目录中的 MKV 成品，供旧成品复用逻辑使用。
     def _index_existing_outputs(self, output_dir: Path) -> list[Path]:
         """一次性索引输出目录中的 MKV，避免每个任务都递归扫描磁盘。"""
         results: list[Path] = []
@@ -1007,7 +1476,10 @@ class AV1CompressorApp:
             return results
         try:
             for current_root, dirnames, filenames in os.walk(output_dir):
-                dirnames[:] = [name for name in dirnames if name != PENDING_DELETE_DIRNAME]
+                dirnames[:] = [
+                    name for name in dirnames
+                    if name not in {PENDING_DELETE_DIRNAME, FAILED_DIRNAME, NO_GAIN_DIRNAME, TEMP_WORK_DIRNAME}
+                ]
                 root_path = Path(current_root)
                 for filename in filenames:
                     if Path(filename).suffix.lower() != ".mkv":
@@ -1017,7 +1489,11 @@ class AV1CompressorApp:
                         if not path.is_file():
                             continue
                         lower_name = filename.casefold()
-                        if ".__processing__.mkv" in lower_name or ".invalid_" in lower_name:
+                        if (
+                            ".__processing__.mkv" in lower_name
+                            or ".__remux_retry__.mkv" in lower_name
+                            or ".invalid_" in lower_name
+                        ):
                             continue
                         if lower_name.endswith(".no_gain_unrecorded.mkv"):
                             continue
@@ -1042,6 +1518,7 @@ class AV1CompressorApp:
                 index.setdefault(key, []).append(path)
         return index
 
+    # 封装 ffprobe 调用，统一返回 JSON。所有媒体判断都应来自这里的结构化结果。
     def _probe(self, path: Path) -> dict[str, Any]:
         command = [
             self.ffprobe,
@@ -1069,6 +1546,8 @@ class AV1CompressorApp:
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"ffprobe JSON 无法解析：{exc}") from exc
 
+    # 将 ffprobe 结果转换成 Task。
+    # 这里是“自动判断”的核心：分辨率、CRF、音频策略、字幕/附件映射都在此确定。
     def _task_from_probe(
         self,
         path: Path,
@@ -1140,6 +1619,7 @@ class AV1CompressorApp:
             return None
 
         fps = parse_fraction(video.get("avg_frame_rate")) or parse_fraction(video.get("r_frame_rate"))
+        cfr_rate, cfr_reason = choose_cfr_retry_rate(video)
         hdr_type = detect_hdr_type(video)
         side_data_types = [
             str(item.get("side_data_type", "")).strip()
@@ -1210,6 +1690,8 @@ class AV1CompressorApp:
             video_index=parse_int(video.get("index")),
             video_codec=video_codec,
             pix_fmt=pix_fmt,
+            cfr_rate=cfr_rate,
+            cfr_reason=cfr_reason,
             rotation=rotation,
             color_primaries=str(video.get("color_primaries", "")),
             color_transfer=str(video.get("color_transfer", "")),
@@ -1235,6 +1717,12 @@ class AV1CompressorApp:
             task.message = "已有无压缩收益记录，源文件和编码策略均未变化"
             reserved_outputs.add(os.path.normcase(str(base_final_path.resolve(strict=False))))
             self._cleanup_recorded_no_gain_output(task, no_gain_record)
+            if self.move_no_gain_enabled:
+                moved, move_detail = self._move_original_to_no_gain(task, parse_int(no_gain_record.get("output_size"), 0), "命中无收益记录")
+                if moved:
+                    task.message += f"；{move_detail}"
+                else:
+                    self.log(f"命中无收益记录，但移动源文件失败：{move_detail}", logging.WARNING)
             self.log(f"跳过 {path.name}：命中无压缩收益记录。")
         else:
             task.output_path = str(unique_path(base_final_path, reserved_outputs))
@@ -1259,71 +1747,46 @@ class AV1CompressorApp:
 
     # ---------- 单任务编码 ----------
 
-    def _process_task(self, task: Task) -> tuple[str, str]:
-        input_path = Path(task.input_path)
-        final_path = Path(task.output_path)
-        final_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = final_path.with_name(f"{final_path.stem}.__processing__.mkv")
+    # 统一构造失败结果。是否移动到 _压制失败 由 move_eligible 和失败类型共同决定。
+    def _failure_result(
+        self,
+        task: Task,
+        message: str,
+        *,
+        stage: str,
+        move_eligible: bool,
+        return_code: Optional[int] = None,
+        ffmpeg_command: str = "",
+    ) -> tuple[str, str]:
+        task.failure_move_eligible = move_eligible
+        task.failure_stage = stage
+        task.failure_return_code = return_code
+        task.failure_error = message
+        task.failure_ffmpeg_command = ffmpeg_command
+        return "失败", message
 
-        if not input_path.exists():
-            return "失败", "源文件不存在"
-        stat = input_path.stat()
-        if stat.st_size != task.input_size or stat.st_mtime_ns != task.input_mtime_ns:
-            return "失败", "源文件在扫描后发生变化"
-
-        if temp_path.exists():
-            try:
-                temp_path.unlink()
-                self.log(f"清理上次遗留临时文件：{temp_path}")
-            except OSError as exc:
-                return "失败", f"无法删除遗留临时文件：{exc}"
-
-        if final_path.exists():
-            valid, details = self._validate_existing_output(task, final_path)
-            if valid:
-                self._claim_existing_output(final_path)
-                return self._handle_reusable_output(task, final_path, "预期路径中的已有输出")
-            renamed = final_path.with_name(
-                f"{final_path.stem}.invalid_{datetime.now():%Y%m%d_%H%M%S}{final_path.suffix}"
-            )
-            try:
-                final_path.rename(renamed)
-                self.log(f"已有输出验证失败（{details}），已保留为：{renamed}", logging.WARNING)
-            except OSError as exc:
-                return "失败", f"已有无效输出无法改名：{exc}"
-
-        legacy_path = self._find_reusable_old_output(task, final_path)
-        if legacy_path is not None:
-            return self._handle_reusable_output(task, legacy_path, "扫描发现的旧成品")
-
-        free = shutil.disk_usage(final_path.parent).free
-        minimum_free = min(task.input_size + 512 * 1024 * 1024, 8 * 1024 * 1024 * 1024)
-        if free < minimum_free:
-            return "失败", f"磁盘空间不足：剩余 {format_bytes(free)}"
-
-        command = self._build_ffmpeg_command(task, temp_path)
-        self.log(f"开始编码：{input_path}")
-        self.log(f"FFmpeg 命令：{display_command(command)}", gui=False)
-
+    # 运行正式编码命令，并通过 -progress pipe:1 读取当前文件进度。
+    def _run_encoding_command(
+        self,
+        progress_task: Task,
+        command: list[str],
+        log_source: Path,
+    ) -> tuple[int, list[str], float]:
         stderr_lines: list[str] = []
         start_time = time.monotonic()
         current_seconds = 0.0
         current_speed = 0.0
 
-        try:
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1,
-                **subprocess_options(),
-            )
-        except OSError as exc:
-            return "失败", f"无法启动 FFmpeg：{exc}"
-
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            **subprocess_options(),
+        )
         with self.process_lock:
             self.current_process = process
 
@@ -1347,13 +1810,16 @@ class AV1CompressorApp:
                 key, value = line.split("=", 1)
                 progress_data[key] = value
                 if key == "out_time":
-                    current_seconds = min(parse_ffmpeg_time(value), task.duration)
+                    current_seconds = min(parse_ffmpeg_time(value), progress_task.duration)
                 elif key == "speed":
                     current_speed = parse_float(value.rstrip("x"), 0.0)
                 elif key == "progress":
-                    percent = min(max(current_seconds / task.duration, 0.0), 1.0)
-                    current_eta = (task.duration - current_seconds) / current_speed if current_speed > 0 else None
-                    self._update_encoding_progress(task, percent, current_speed, current_eta)
+                    percent = min(max(current_seconds / progress_task.duration, 0.0), 1.0)
+                    current_eta = (
+                        (progress_task.duration - current_seconds) / current_speed
+                        if current_speed > 0 else None
+                    )
+                    self._update_encoding_progress(progress_task, percent, current_speed, current_eta)
                     progress_data.clear()
 
             return_code = process.wait()
@@ -1362,80 +1828,551 @@ class AV1CompressorApp:
             with self.process_lock:
                 self.current_process = None
 
-        elapsed = time.monotonic() - start_time
         stderr_text = "\n".join(stderr_lines)
         if stderr_text:
-            self.logger.debug("FFmpeg stderr for %s:\n%s", input_path, stderr_text)
+            self.logger.debug("FFmpeg stderr for %s:\n%s", log_source, stderr_text)
+        return return_code, stderr_lines, time.monotonic() - start_time
 
-        if self.stop_event.is_set():
-            self._safe_unlink(temp_path)
-            raise InterruptedError
-
-        if return_code != 0:
-            self._safe_unlink(temp_path)
-            tail = " | ".join(stderr_lines[-5:]) or f"返回码 {return_code}"
-            self.log(f"编码失败：{input_path.name}：{tail}", logging.ERROR)
-            return "失败", tail[:300]
-
-        if not temp_path.exists() or temp_path.stat().st_size <= 0:
-            self._safe_unlink(temp_path)
-            return "失败", "FFmpeg 未生成有效临时文件"
-
-        self.log(f"编码结束，开始验证：{input_path.name}")
-        suspicious = any(
-            ERROR_WORDS.search(line)
-            and "failed to set thread priority" not in line.lower()
-            and not is_benign_timestamp_message(line)
-            for line in stderr_lines
+    # 运行不需要进度条的 FFmpeg 命令，例如无损重封装或完整解码验证。
+    def _run_ffmpeg_capture(
+        self,
+        command: list[str],
+        log_label: str,
+    ) -> tuple[int, list[str], float]:
+        stderr_lines: list[str] = []
+        start_time = time.monotonic()
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **subprocess_options(),
         )
-        valid, details = self._validate_output(task, temp_path, suspicious)
-        if not valid:
-            self._safe_unlink(temp_path)
-            self.log(f"验证失败：{input_path.name}：{details}", logging.ERROR)
-            return "失败", f"验证失败：{details}"
+        with self.process_lock:
+            self.current_process = process
 
-        output_size = temp_path.stat().st_size
-        task.output_size = output_size
-        if output_size >= task.input_size:
-            if not self._record_no_gain(task, output_size):
-                preserved = final_path.with_name(f"{final_path.stem}.no_gain_unrecorded.mkv")
-                try:
-                    os.replace(temp_path, preserved)
-                    return "失败", f"无收益状态写入失败；输出已保留为 {preserved.name}"
-                except OSError:
-                    return "失败", "无收益状态写入失败；临时输出未删除"
-            self._safe_unlink(temp_path)
-            self.log(
-                f"无压缩收益：{input_path.name}，源 {format_bytes(task.input_size)}，"
-                f"输出 {format_bytes(output_size)}；已记录并删除输出。",
-                logging.WARNING,
-            )
-            return "无收益", "输出不小于源文件，已记录"
-
+        stderr_thread = threading.Thread(
+            target=self._collect_stderr,
+            args=(process, stderr_lines),
+            daemon=True,
+        )
+        stderr_thread.start()
         try:
-            os.replace(temp_path, final_path)
-        except OSError as exc:
-            self._safe_unlink(temp_path)
-            return "失败", f"临时文件改名失败：{exc}"
+            while process.poll() is None:
+                if self.stop_event.is_set():
+                    self._terminate_current_process()
+                    raise InterruptedError
+                time.sleep(0.2)
+            stderr_thread.join(timeout=2)
+            return_code = process.returncode if process.returncode is not None else -1
+        finally:
+            with self.process_lock:
+                self.current_process = None
 
-        move_detail = ""
-        if self.move_original_enabled:
-            moved, move_detail = self._move_original_to_pending(task)
-            if not moved:
-                self.log(f"输出已完成，但移动原文件失败：{move_detail}", logging.WARNING)
+        stderr_text = "\n".join(stderr_lines)
+        if stderr_text:
+            self.logger.debug("FFmpeg stderr for %s:\n%s", log_label, stderr_text)
+        return return_code, stderr_lines, time.monotonic() - start_time
 
-        saving = 100.0 * (1.0 - output_size / task.input_size)
-        self.log(
-            f"完成：{input_path.name} -> {final_path.name} | "
-            f"{format_bytes(task.input_size)} -> {format_bytes(output_size)} | "
-            f"节省 {saving:.1f}% | 用时 {format_duration(elapsed)}"
+    # 构造无损重封装命令：-fflags +genpts + -c copy。
+    # 这一步不重新编码，不损失画质，只尝试修复容器/时间戳问题。
+    def _build_remux_retry_command(self, task: Task, remux_path: Path) -> list[str]:
+        # 命令必须使用 list 形式，不能拼接成 shell 字符串。
+        # 这样中文、日文、空格、方括号、感叹号等文件名都能安全传入 FFmpeg。
+        command = [
+            self.ffmpeg,
+            "-hide_banner",
+            "-nostdin",
+            "-y",
+            "-loglevel", "warning",
+            "-fflags", "+genpts",
+            "-i", task.input_path,
+            "-map", f"0:{task.video_index}",
+        ]
+        # 显式映射所有音轨，保持多音轨顺序。每条音轨后面再按 AudioPlan 决定 copy 或 Opus。
+        for plan in task.audio_plans:
+            command += ["-map", f"0:{plan.input_index}"]
+        for index in task.subtitle_indexes:
+            command += ["-map", f"0:{index}"]
+        for index in task.attachment_indexes:
+            command += ["-map", f"0:{index}"]
+        for index in task.cover_indexes:
+            command += ["-map", f"0:{index}"]
+
+        command += [
+            "-map_metadata", "0",
+            "-map_chapters", "0",
+            "-c:v", "copy",
+            "-c:a", "copy",
+        ]
+        for subtitle_output_index, codec in enumerate(task.subtitle_codecs):
+            if codec in TEXT_SUBTITLE_TO_SRT:
+                command += [f"-c:s:{subtitle_output_index}", "srt"]
+            else:
+                command += [f"-c:s:{subtitle_output_index}", "copy"]
+        if task.attachment_indexes:
+            command += ["-c:t", "copy"]
+        command += [
+            "-max_muxing_queue_size", "4096",
+            "-f", "matroska",
+            str(remux_path),
+        ]
+        return command
+
+    # 重封装后重新探测临时 MKV，并把原 Task 的流索引映射到新容器。
+    # 若音轨/字幕/章节数量变化，说明重封装不安全，必须停止。
+    def _task_for_remuxed_input(self, task: Task, remux_path: Path) -> Task:
+        probe = self._probe(remux_path)
+        streams = probe.get("streams") or []
+        videos = [
+            stream for stream in streams
+            if stream.get("codec_type") == "video"
+            and parse_int((stream.get("disposition") or {}).get("attached_pic"), 0) == 0
+        ]
+        audios = [stream for stream in streams if stream.get("codec_type") == "audio"]
+        subtitles = [stream for stream in streams if stream.get("codec_type") == "subtitle"]
+        attachments = [stream for stream in streams if stream.get("codec_type") == "attachment"]
+
+        if len(videos) != 1:
+            raise RuntimeError(f"重封装后主视频流数量异常：{len(videos)}")
+        if len(audios) != len(task.audio_plans):
+            raise RuntimeError(f"重封装后音轨数量变化：{len(task.audio_plans)} -> {len(audios)}")
+        if len(subtitles) != len(task.subtitle_indexes):
+            raise RuntimeError(f"重封装后字幕数量变化：{len(task.subtitle_indexes)} -> {len(subtitles)}")
+        if len(attachments) != len(task.attachment_indexes):
+            raise RuntimeError(f"重封装后附件数量变化：{len(task.attachment_indexes)} -> {len(attachments)}")
+        chapter_count = len(probe.get("chapters") or [])
+        if chapter_count != task.chapter_count:
+            raise RuntimeError(f"重封装后章节数量变化：{task.chapter_count} -> {chapter_count}")
+
+        video = videos[0]
+        raw_width = parse_int(video.get("width"), 0)
+        raw_height = parse_int(video.get("height"), 0)
+        expected_width, expected_height = (
+            (task.height, task.width) if task.rotation in {90, 270} else (task.width, task.height)
         )
-        message = f"节省 {saving:.1f}%"
-        if move_detail:
-            message += f"；{move_detail}"
-        return "完成", message
+        if (raw_width, raw_height) != (expected_width, expected_height):
+            raise RuntimeError(
+                f"重封装后分辨率变化：{expected_width}x{expected_height} -> {raw_width}x{raw_height}"
+            )
+        remux_duration = get_duration(probe, video)
+        tolerance = max(2.0, task.duration * 0.005)
+        if remux_duration <= 0 or abs(remux_duration - task.duration) > tolerance:
+            raise RuntimeError(
+                f"重封装后时长异常：{task.duration:.3f}s -> {remux_duration:.3f}s"
+            )
 
-    def _build_ffmpeg_command(self, task: Task, temp_path: Path) -> list[str]:
+        remapped_audio = [
+            replace(plan, input_index=parse_int(stream.get("index")))
+            for plan, stream in zip(task.audio_plans, audios)
+        ]
+        return replace(
+            task,
+            input_path=str(remux_path),
+            video_index=parse_int(video.get("index")),
+            audio_plans=remapped_audio,
+            subtitle_indexes=[parse_int(stream.get("index")) for stream in subtitles],
+            subtitle_codecs=[str(stream.get("codec_name", "unknown")).lower() for stream in subtitles],
+            attachment_indexes=[parse_int(stream.get("index")) for stream in attachments],
+            cover_indexes=[],
+        )
+
+    # 判断失败是否更像环境问题。磁盘满、权限错误等不应把源文件移入 _压制失败。
+    def _ffmpeg_error_is_environmental(self, stderr_lines: list[str]) -> bool:
+        text = "\n".join(stderr_lines).lower()
+        return any(token in text for token in (
+            "no space left",
+            "disk full",
+            "permission denied",
+            "access is denied",
+            "read-only file system",
+            "not enough space",
+        ))
+
+    # 处理单个任务的主状态机。
+    # 顺序大致为：检查源文件 -> 查找已有成品 -> 编码 -> 访问冲突自动重封装 -> CFR 回退 -> 验证 -> 归类。
+    def _process_task(self, task: Task) -> tuple[str, str]:
+        # 每个任务进入这里时，都先清空上一次失败状态，避免复用旧错误信息。
+        # 后续任何 return 都应通过 _failure_result 或明确的成功/跳过分支，
+        # 这样状态栏、日志、失败说明文件和 state.json 才能保持一致。
+        task.failure_move_eligible = False
+        task.failure_stage = ""
+        task.failure_return_code = None
+        task.failure_moved_to = ""
+        task.failure_error = ""
+        task.failure_ffmpeg_command = ""
+        input_path = Path(task.input_path)
+        final_path = Path(task.output_path)
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = final_path.with_name(f"{final_path.stem}.__processing__.mkv")
+        remux_path = self._remux_retry_path_for_task(task)
+
+        if not input_path.exists():
+            return self._failure_result(task, "源文件不存在", stage="源文件检查", move_eligible=False)
+        stat = input_path.stat()
+        if stat.st_size != task.input_size or stat.st_mtime_ns != task.input_mtime_ns:
+            return self._failure_result(task, "源文件在扫描后发生变化", stage="源文件检查", move_eligible=False)
+
+        for stale_path, label in ((temp_path, "编码临时文件"), (remux_path, "重封装临时文件")):
+            if stale_path.exists():
+                try:
+                    stale_path.unlink()
+                    self.log(f"清理上次遗留{label}：{stale_path}")
+                except OSError as exc:
+                    return self._failure_result(
+                        task,
+                        f"无法删除遗留{label}：{exc}",
+                        stage="临时文件清理",
+                        move_eligible=False,
+                    )
+
+        # 先检查“预期路径”是否已经有成品。
+        # 这是最快、最可靠的跳过方式：有效且更小则跳过/补移源文件；
+        # 无效则改名保留，避免覆盖用户可能想检查的旧文件。
+        if final_path.exists():
+            valid, details = self._validate_existing_output(task, final_path)
+            if valid:
+                self._claim_existing_output(final_path)
+                return self._handle_reusable_output(task, final_path, "预期路径中的已有输出")
+            renamed = final_path.with_name(
+                f"{final_path.stem}.invalid_{datetime.now():%Y%m%d_%H%M%S}{final_path.suffix}"
+            )
+            try:
+                final_path.rename(renamed)
+                self.log(f"已有输出验证失败（{details}），已保留为：{renamed}", logging.WARNING)
+            except OSError as exc:
+                return self._failure_result(task, f"已有无效输出无法改名：{exc}", stage="已有输出处理", move_eligible=False)
+
+        # 如果预期路径没有成品，再扫描输出目录中可能存在的旧成品。
+        # 旧成品验证会使用来源元数据、快速指纹、文件名和媒体结构多重条件，
+        # 避免把同名但不同内容的视频误判为当前任务的输出。
+        legacy_path = self._find_reusable_old_output(task, final_path)
+        if legacy_path is not None:
+            return self._handle_reusable_output(task, legacy_path, "扫描发现的旧成品")
+
+        free = shutil.disk_usage(final_path.parent).free
+        minimum_free = min(task.input_size + 512 * 1024 * 1024, 8 * 1024 * 1024 * 1024)
+        if free < minimum_free:
+            return self._failure_result(task, f"磁盘空间不足：剩余 {format_bytes(free)}", stage="磁盘空间检查", move_eligible=False)
+
+        total_start_time = time.monotonic()
+        command = self._build_ffmpeg_command(task, temp_path)
+        command_history: list[tuple[str, list[str]]] = [("首次编码", command)]
+        self.log(f"开始编码：{input_path}")
+        self.log(f"FFmpeg 命令：{display_command(command)}", gui=False)
+
+        # 两个标记仅用于最后的日志/状态说明：
+        # used_remux_retry 表示曾经因为访问冲突而无损重封装；
+        # used_cfr_retry 表示重封装后仍不稳定，于是重新生成固定帧率时间戳。
+        used_remux_retry = False
+        used_cfr_retry = False
+        try:
+            try:
+                return_code, stderr_lines, _ = self._run_encoding_command(task, command, input_path)
+            except OSError as exc:
+                return self._failure_result(task, f"无法启动 FFmpeg：{exc}", stage="启动 FFmpeg", move_eligible=False)
+
+            if self.stop_event.is_set():
+                self._safe_unlink(temp_path)
+                raise InterruptedError
+
+            if return_code != 0 and (return_code & 0xFFFFFFFF) == 0xC0000005:
+                # 已确认这类崩溃可能由 MP4 时间戳/封装结构稳定触发。
+                # 先以 stream copy + genpts 无损重封装，再用相同编码参数重试一次。
+                self._safe_unlink(temp_path)
+                used_remux_retry = True
+                task.message = "检测到 FFmpeg 访问冲突，正在自动无损重封装后重试"
+                self._update_task_ui(task)
+                self.ui_queue.put(("current_text", f"自动修复封装：{input_path.name}"))
+                self.log(
+                    f"首次编码发生 0xC0000005：{input_path.name}；"
+                    "开始无损重封装并自动重试一次。",
+                    logging.WARNING,
+                )
+
+                remux_prepare_error = self._prepare_remux_retry_path(task, remux_path)
+                if remux_prepare_error:
+                    return self._failure_result(
+                        task,
+                        f"首次编码访问冲突，但无法自动无损重封装：{remux_prepare_error}",
+                        stage="自动无损重封装准备",
+                        move_eligible=False,
+                        return_code=return_code,
+                        ffmpeg_command="\n\n".join(
+                            f"[{label}]\n{display_command(item)}" for label, item in command_history
+                        ),
+                    )
+
+                remux_command = self._build_remux_retry_command(task, remux_path)
+                command_history.append(("自动无损重封装", remux_command))
+                self.log(f"自动重封装命令：{display_command(remux_command)}", gui=False)
+                try:
+                    remux_return_code, remux_stderr, _ = self._run_ffmpeg_capture(
+                        remux_command,
+                        f"自动重封装 {input_path}",
+                    )
+                except OSError as exc:
+                    return self._failure_result(
+                        task,
+                        f"访问冲突后无法启动自动重封装：{exc}",
+                        stage="自动无损重封装",
+                        move_eligible=False,
+                        return_code=return_code,
+                        ffmpeg_command="\n\n".join(
+                            f"[{label}]\n{display_command(item)}" for label, item in command_history
+                        ),
+                    )
+
+                if remux_return_code != 0:
+                    summary = summarize_ffmpeg_failure(remux_return_code, remux_stderr)
+                    self.log(
+                        f"自动无损重封装失败：{input_path.name}：{summary} | "
+                        f"返回码 {format_process_return_code(remux_return_code)}",
+                        logging.ERROR,
+                    )
+                    return self._failure_result(
+                        task,
+                        f"首次编码访问冲突，自动无损重封装失败：{summary}",
+                        stage="自动无损重封装",
+                        move_eligible=not self._ffmpeg_error_is_environmental(remux_stderr),
+                        return_code=remux_return_code,
+                        ffmpeg_command="\n\n".join(
+                            f"[{label}]\n{display_command(item)}" for label, item in command_history
+                        ),
+                    )
+                if not remux_path.exists() or remux_path.stat().st_size <= 0:
+                    return self._failure_result(
+                        task,
+                        "首次编码访问冲突，自动无损重封装未生成有效文件",
+                        stage="自动无损重封装",
+                        move_eligible=True,
+                        return_code=remux_return_code,
+                        ffmpeg_command="\n\n".join(
+                            f"[{label}]\n{display_command(item)}" for label, item in command_history
+                        ),
+                    )
+
+                try:
+                    retry_task = self._task_for_remuxed_input(task, remux_path)
+                except Exception as exc:
+                    return self._failure_result(
+                        task,
+                        f"自动无损重封装完成，但结构验证失败：{exc}",
+                        stage="自动无损重封装验证",
+                        move_eligible=True,
+                        return_code=remux_return_code,
+                        ffmpeg_command="\n\n".join(
+                            f"[{label}]\n{display_command(item)}" for label, item in command_history
+                        ),
+                    )
+
+                # 重封装临时文件通过验证后，仍使用原来的 CRF、Preset、音频策略重新编码。
+                retry_command = self._build_ffmpeg_command(retry_task, temp_path)
+                command_history.append(("重封装后重试编码", retry_command))
+                task.message = "无损重封装完成，正在重新编码"
+                self._update_task_ui(task)
+                self.ui_queue.put(("current_text", f"重封装后重试：{input_path.name}"))
+                self.log(f"重封装成功，重新编码：{input_path.name}")
+                self.log(f"重试 FFmpeg 命令：{display_command(retry_command)}", gui=False)
+                try:
+                    return_code, stderr_lines, _ = self._run_encoding_command(
+                        task,
+                        retry_command,
+                        remux_path,
+                    )
+                except OSError as exc:
+                    return self._failure_result(
+                        task,
+                        f"重封装后无法启动 FFmpeg：{exc}",
+                        stage="重封装后重试编码",
+                        move_eligible=False,
+                        ffmpeg_command="\n\n".join(
+                            f"[{label}]\n{display_command(item)}" for label, item in command_history
+                        ),
+                    )
+
+                if (
+                    return_code != 0
+                    and task.cfr_rate
+                    and not self._ffmpeg_error_is_environmental(stderr_lines)
+                    and not self.stop_event.is_set()
+                ):
+                    # 第二级回退：重封装仍失败时，对明确固定帧率素材重新生成 CFR 时间戳。
+                    # 这只在故障回退链中触发，不影响普通视频的 passthrough 路径。
+                    self._safe_unlink(temp_path)
+                    used_cfr_retry = True
+                    task.message = f"重封装后仍失败，正在尝试 CFR 时间戳规范化（{task.cfr_rate}）"
+                    self._update_task_ui(task)
+                    self.ui_queue.put(("current_text", f"CFR 时间戳规范化重试：{input_path.name}"))
+                    self.log(
+                        f"重封装后重试仍失败，尝试 CFR 时间戳规范化：{input_path.name}；"
+                        f"帧率 {task.cfr_rate}；原因：{task.cfr_reason}",
+                        logging.WARNING,
+                    )
+                    cfr_command = self._build_ffmpeg_command(retry_task, temp_path, cfr_rate=task.cfr_rate)
+                    command_history.append((f"CFR 时间戳规范化重试（-r {task.cfr_rate} -fps_mode cfr）", cfr_command))
+                    self.log(f"CFR 重试 FFmpeg 命令：{display_command(cfr_command)}", gui=False)
+                    try:
+                        return_code, stderr_lines, _ = self._run_encoding_command(
+                            task,
+                            cfr_command,
+                            remux_path,
+                        )
+                    except OSError as exc:
+                        return self._failure_result(
+                            task,
+                            f"CFR 时间戳规范化重试无法启动 FFmpeg：{exc}",
+                            stage="CFR 时间戳规范化重试",
+                            move_eligible=False,
+                            ffmpeg_command="\n\n".join(
+                                f"[{label}]\n{display_command(item)}" for label, item in command_history
+                            ),
+                        )
+
+            if self.stop_event.is_set():
+                self._safe_unlink(temp_path)
+                raise InterruptedError
+
+            command_text = "\n\n".join(
+                f"[{label}]\n{display_command(item)}" for label, item in command_history
+            )
+            # 所有自动回退都尝试完后，仍然非零才进入真正失败处理。
+            if return_code != 0:
+                self._safe_unlink(temp_path)
+                summary = summarize_ffmpeg_failure(return_code, stderr_lines)
+                if used_cfr_retry:
+                    stage = "CFR 时间戳规范化重试"
+                    prefix = "CFR 时间戳规范化重试仍失败"
+                elif used_remux_retry:
+                    stage = "重封装后重试编码"
+                    prefix = "重封装后重试仍失败"
+                else:
+                    stage = "编码"
+                    prefix = "编码失败"
+                self.log(
+                    f"{prefix}：{input_path.name}：{summary} | "
+                    f"返回码 {format_process_return_code(return_code)}",
+                    logging.ERROR,
+                )
+                return self._failure_result(
+                    task,
+                    summary[:1500],
+                    stage=stage,
+                    move_eligible=not self._ffmpeg_error_is_environmental(stderr_lines),
+                    return_code=return_code,
+                    ffmpeg_command=command_text,
+                )
+
+            if not temp_path.exists() or temp_path.stat().st_size <= 0:
+                self._safe_unlink(temp_path)
+                return self._failure_result(
+                    task,
+                    "FFmpeg 未生成有效临时文件",
+                    stage="CFR 时间戳规范化输出" if used_cfr_retry else ("重封装后编码输出" if used_remux_retry else "编码输出"),
+                    move_eligible=True,
+                    return_code=return_code,
+                    ffmpeg_command=command_text,
+                )
+
+            self.log(f"编码结束，开始验证：{input_path.name}")
+            # FFmpeg 的 stderr 里经常有 warning/info。
+            # 只有包含错误关键词且不属于时间戳白名单时，才触发更重的完整解码验证。
+            suspicious = any(
+                ERROR_WORDS.search(line)
+                and "failed to set thread priority" not in line.lower()
+                and not is_benign_timestamp_message(line)
+                for line in stderr_lines
+            )
+            valid, details = self._validate_output(task, temp_path, suspicious)
+            if not valid:
+                self._safe_unlink(temp_path)
+                self.log(f"验证失败：{input_path.name}：{details}", logging.ERROR)
+                return self._failure_result(
+                    task,
+                    f"验证失败：{details}",
+                    stage="完成验证",
+                    move_eligible=True,
+                    return_code=return_code,
+                    ffmpeg_command=command_text,
+                )
+
+            output_size = temp_path.stat().st_size
+            task.output_size = output_size
+            # 无收益的判断必须在正式改名之前完成。
+            # 输出不比源文件小时，删除转码产物并记录无收益，必要时移动源文件到 _无压缩收益。
+            if output_size >= task.input_size:
+                if not self._record_no_gain(task, output_size):
+                    preserved = final_path.with_name(f"{final_path.stem}.no_gain_unrecorded.mkv")
+                    try:
+                        os.replace(temp_path, preserved)
+                        return self._failure_result(
+                            task,
+                            f"无收益状态写入失败；输出已保留为 {preserved.name}",
+                            stage="状态写入",
+                            move_eligible=False,
+                        )
+                    except OSError:
+                        return self._failure_result(
+                            task,
+                            "无收益状态写入失败；临时输出未删除",
+                            stage="状态写入",
+                            move_eligible=False,
+                        )
+                self._safe_unlink(temp_path)
+                move_note = ""
+                if self.move_no_gain_enabled:
+                    moved, move_detail = self._move_original_to_no_gain(task, output_size, "新输出无压缩收益")
+                    move_note = f"；{move_detail}"
+                    if not moved:
+                        self.log(f"无收益已记录，但移动源文件失败：{move_detail}", logging.WARNING)
+                self.log(
+                    f"无压缩收益：{input_path.name}，源 {format_bytes(task.input_size)}，"
+                    f"输出 {format_bytes(output_size)}；已记录并删除输出{move_note}。",
+                    logging.WARNING,
+                )
+                return "无收益", f"输出不小于源文件，已记录{move_note}"
+
+            try:
+                os.replace(temp_path, final_path)
+            except OSError as exc:
+                self._safe_unlink(temp_path)
+                return self._failure_result(task, f"临时文件改名失败：{exc}", stage="输出落盘", move_eligible=False)
+
+            move_detail = ""
+            if self.move_original_enabled:
+                moved, move_detail = self._move_original_to_pending(task)
+                if not moved:
+                    self.log(f"输出已完成，但移动原文件失败：{move_detail}", logging.WARNING)
+
+            elapsed = time.monotonic() - total_start_time
+            saving = 100.0 * (1.0 - output_size / task.input_size)
+            if used_cfr_retry:
+                retry_note = " | 自动无损重封装 + CFR 时间戳规范化后重试成功"
+            elif used_remux_retry:
+                retry_note = " | 自动无损重封装后重试成功"
+            else:
+                retry_note = ""
+            self.log(
+                f"完成：{input_path.name} -> {final_path.name} | "
+                f"{format_bytes(task.input_size)} -> {format_bytes(output_size)} | "
+                f"节省 {saving:.1f}% | 用时 {format_duration(elapsed)}{retry_note}"
+            )
+            message = f"节省 {saving:.1f}%"
+            if used_cfr_retry:
+                message += "；自动重封装+CFR后成功"
+            elif used_remux_retry:
+                message += "；自动重封装后成功"
+            if move_detail:
+                message += f"；{move_detail}"
+            return "完成", message
+        finally:
+            self._safe_unlink(remux_path)
+
+    # 构造正式压制命令。
+    # 正常路径使用 fps_mode passthrough；当 cfr_rate 非空时，故障回退使用 -r + fps_mode cfr。
+    def _build_ffmpeg_command(self, task: Task, temp_path: Path, *, cfr_rate: str = "") -> list[str]:
         command = [
             self.ffmpeg,
             "-hide_banner",
@@ -1465,8 +2402,15 @@ class AV1CompressorApp:
             "-crf", str(task.crf),
             "-svtav1-params", "tune=0",
             "-pix_fmt", "yuv420p10le",
-            "-fps_mode:v:0", "passthrough",
         ]
+        if cfr_rate:
+            # 故障回退专用：对确认接近固定帧率的源视频重新生成 CFR 时间戳。
+            # 这可以绕过少数 passthrough 时间戳触发的 SVT/FFmpeg 崩溃或 frame=0 卡住问题。
+            command += ["-r:v:0", cfr_rate, "-fps_mode:v:0", "cfr"]
+        else:
+            # 正常路径：尽量保持源视频帧时间戳，不主动复制/丢帧。
+            command += ["-fps_mode:v:0", "passthrough"]
+
 
         # 显式传递常见色彩标记；找不到时不乱填。
         color_values = (
@@ -1515,6 +2459,7 @@ class AV1CompressorApp:
         ]
         return command
 
+    # 独立线程读取 FFmpeg stderr，防止管道缓冲区塞满导致子进程卡死。
     def _collect_stderr(self, process: subprocess.Popen[str], target: list[str]) -> None:
         if process.stderr is None:
             return
@@ -1618,6 +2563,7 @@ class AV1CompressorApp:
             if index % 25 == 0 or index == total:
                 self.ui_queue.put(("current_text", f"建立旧成品指纹索引：{index}/{total}"))
 
+    # 查找可复用旧成品：先用工具写入的来源元数据和快速指纹匹配，再谨慎匹配旧命名。
     def _find_reusable_old_output(self, task: Task, expected_path: Path) -> Optional[Path]:
         """
         在编码前查找旧成品。
@@ -1726,6 +2672,7 @@ class AV1CompressorApp:
         self.log(f"编码前发现可复用旧成品：{chosen}（{reason}），将验证后跳过编码。")
         return chosen
 
+    # 已有成品验证通过后的处理：小于源文件则可补移源文件；无收益则记录并删除成品。
     def _handle_reusable_output(self, task: Task, path: Path, source_label: str) -> tuple[str, str]:
         original_output_path = task.output_path
         task.output_path = str(path)
@@ -1742,11 +2689,17 @@ class AV1CompressorApp:
                 path.unlink()
             except OSError as exc:
                 return "失败", f"无收益已记录，但无法删除已有输出：{exc}"
+            move_note = ""
+            if self.move_no_gain_enabled:
+                moved, move_detail = self._move_original_to_no_gain(task, task.output_size, f"{source_label}无压缩收益")
+                move_note = f"；{move_detail}"
+                if not moved:
+                    self.log(f"{source_label}无收益已记录，但移动源文件失败：{move_detail}", logging.WARNING)
             self.log(
-                f"{source_label}无压缩收益：{path.name}，已记录并删除输出；保留源文件。",
+                f"{source_label}无压缩收益：{path.name}，已记录并删除输出{move_note}。",
                 logging.WARNING,
             )
-            return "无收益", "已有输出不小于源文件，已记录并删除"
+            return "无收益", f"已有输出不小于源文件，已记录并删除{move_note}"
 
         moved_note = ""
         if self.move_original_enabled:
@@ -1759,6 +2712,8 @@ class AV1CompressorApp:
 
     # ---------- 验证 ----------
 
+    # 验证已有输出是否能代表当前源文件。
+    # 这是跳过重复编码和补移原文件的前置保护。
     def _validate_existing_output(self, task: Task, path: Path) -> tuple[bool, str]:
         try:
             if path.stat().st_size <= 0:
@@ -1773,6 +2728,7 @@ class AV1CompressorApp:
         except Exception as exc:
             return False, str(exc)
 
+    # 验证新生成或已有的 MKV：编码格式、分辨率、时长、音轨、字幕、章节、HDR 等。
     def _validate_output(
         self,
         task: Task,
@@ -1866,6 +2822,8 @@ class AV1CompressorApp:
 
         return True, "验证通过"
 
+    # 完整解码验证只在可疑时运行。
+    # 普通时间戳警告会被白名单忽略，真实解码错误才判失败。
     def _full_decode_verify(self, path: Path) -> tuple[bool, str]:
         command = [
             self.ffmpeg,
@@ -1944,6 +2902,7 @@ class AV1CompressorApp:
             for plan in task.audio_plans
         ]
 
+    # 读取无收益记录。无收益输出会被删除，所以必须靠状态文件防止下次重复压制。
     def _load_no_gain_records(self) -> dict[str, dict[str, Any]]:
         if not STATE_PATH.exists():
             return {}
@@ -1958,6 +2917,7 @@ class AV1CompressorApp:
             return {}
         return {str(key): value for key, value in raw.items() if isinstance(value, dict)}
 
+    # 判断当前源文件是否命中历史无收益记录：路径/大小/mtime/指纹/策略都要匹配。
     def _matching_no_gain_record(self, task: Task) -> Optional[dict[str, Any]]:
         key = self._state_record_key(task.input_path)
         record = self.no_gain_records.get(key)
@@ -1987,6 +2947,7 @@ class AV1CompressorApp:
         self.log(f"无收益记录已失效，将重新处理：{Path(task.input_path).name}", gui=False)
         return None
 
+    # 记录无收益状态。必须先写入成功，再删除无收益输出，避免崩溃后丢记录。
     def _record_no_gain(self, task: Task, output_size: int) -> bool:
         key = self._state_record_key(task.input_path)
         self.no_gain_records[key] = {
@@ -2010,6 +2971,7 @@ class AV1CompressorApp:
             self.no_gain_records.pop(key, None)
             return False
 
+    # 如果异常退出留下无收益输出，只有尺寸与记录一致并验证安全时才清理。
     def _cleanup_recorded_no_gain_output(self, task: Task, record: dict[str, Any]) -> None:
         recorded_path = Path(str(record.get("output_path", task.output_path)))
         processing_path = recorded_path.with_name(f"{recorded_path.stem}.__processing__.mkv")
@@ -2039,6 +3001,7 @@ class AV1CompressorApp:
             except OSError as exc:
                 self.log(f"无法删除无收益残留输出：{candidate}：{exc}", logging.WARNING)
 
+    # 成功且输出更小时，将源文件移入 _待删除原文件，等待用户人工确认删除。
     def _move_original_to_pending(self, task: Task) -> tuple[bool, str]:
         source = Path(task.input_path)
         if not source.exists():
@@ -2062,12 +3025,113 @@ class AV1CompressorApp:
         except Exception as exc:
             return False, f"移动原文件失败：{exc}"
 
+    # 无收益时移动的是源文件，不保留更大的转码产物，并写 no_gain 说明。
+    def _move_original_to_no_gain(self, task: Task, output_size: int, reason: str) -> tuple[bool, str]:
+        source = Path(task.input_path)
+        if not source.exists():
+            return True, "源文件已不在原位置"
+        root = Path(task.source_root)
+        try:
+            relative = source.relative_to(root)
+        except ValueError:
+            relative = Path(source.name)
+        destination = root / NO_GAIN_DIRNAME / relative
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            candidate = destination
+            counter = 2
+            while candidate.exists() or candidate.with_name(candidate.name + ".no_gain.txt").exists():
+                candidate = destination.with_name(f"{destination.stem} ({counter}){destination.suffix}")
+                counter += 1
+
+            shutil.move(str(source), str(candidate))
+            report_path = candidate.with_name(candidate.name + ".no_gain.txt")
+            saving = 100.0 * (1.0 - output_size / task.input_size) if task.input_size > 0 else 0.0
+            report_lines = [
+                "AV1 无压缩收益记录",
+                "=" * 60,
+                f"记录时间：{datetime.now().isoformat(timespec='seconds')}",
+                f"原因：{reason}",
+                f"原始路径：{source}",
+                f"移动位置：{candidate}",
+                f"源文件大小：{task.input_size} 字节",
+                f"转码输出大小：{int(output_size)} 字节",
+                f"节省比例：{saving:.2f}%",
+                f"视频参数：{task.width}x{task.height} / {task.fps:.3f} fps / CRF {task.crf} / Preset 5",
+                f"编码策略：{ENCODING_POLICY_VERSION}",
+                f"快速指纹：{task.source_fingerprint}",
+                f"完整日志：{LOG_PATH}",
+            ]
+            try:
+                report_path.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+            except OSError as exc:
+                self.log(f"无收益源文件已移动，但无法写入说明文件：{report_path}：{exc}", logging.WARNING)
+                self.log(f"无收益源文件已移入：{source} -> {candidate}")
+                return True, f"源文件已移至 {candidate}（说明文件写入失败）"
+
+            self.log(f"无收益源文件已移入：{source} -> {candidate}；说明：{report_path}")
+            return True, f"源文件已移至 {candidate}"
+        except Exception as exc:
+            return False, f"移动无收益源文件失败：{exc}"
+
+    # 确认编码/验证失败时，把源文件移入 _压制失败，并写 failure 说明文件。
+    def _move_original_to_failed(self, task: Task) -> tuple[bool, str]:
+        source = Path(task.input_path)
+        if not source.exists():
+            return False, "源文件已不在原位置"
+        root = Path(task.source_root)
+        try:
+            relative = source.relative_to(root)
+        except ValueError:
+            relative = Path(source.name)
+        destination = root / FAILED_DIRNAME / relative
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            candidate = destination
+            counter = 2
+            while candidate.exists() or candidate.with_name(candidate.name + ".failure.txt").exists():
+                candidate = destination.with_name(f"{destination.stem} ({counter}){destination.suffix}")
+                counter += 1
+
+            shutil.move(str(source), str(candidate))
+            task.failure_moved_to = str(candidate)
+            report_path = candidate.with_name(candidate.name + ".failure.txt")
+            report_lines = [
+                "AV1 压制失败记录",
+                "=" * 60,
+                f"失败时间：{datetime.now().isoformat(timespec='seconds')}",
+                f"原始路径：{source}",
+                f"移动位置：{candidate}",
+                f"失败阶段：{task.failure_stage or '未知'}",
+                f"FFmpeg 返回码：{format_process_return_code(task.failure_return_code) if task.failure_return_code is not None else '无'}",
+                f"错误摘要：{task.failure_error or task.message or '未提供'}",
+                f"视频参数：{task.width}x{task.height} / {task.fps:.3f} fps / CRF {task.crf} / Preset 5",
+                f"编码策略：{ENCODING_POLICY_VERSION}",
+                f"源文件大小：{task.input_size} 字节",
+                f"快速指纹：{task.source_fingerprint}",
+                f"完整日志：{LOG_PATH}",
+            ]
+            if task.failure_ffmpeg_command:
+                report_lines += ["", "FFmpeg 命令：", task.failure_ffmpeg_command]
+            try:
+                report_path.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+            except OSError as exc:
+                self.log(f"失败视频已移动，但无法写入说明文件：{report_path}：{exc}", logging.WARNING)
+                self.log(f"失败源文件已移入：{source} -> {candidate}")
+                return True, f"源文件已移至 {candidate}（说明文件写入失败）"
+
+            self.log(f"失败源文件已移入：{source} -> {candidate}；说明：{report_path}")
+            return True, f"源文件已移至 {candidate}"
+        except Exception as exc:
+            return False, f"移动失败源文件失败：{exc}"
+
     def _save_current_state(self, active: bool) -> None:
         if self.current_state_context is None:
             raise RuntimeError("当前没有可保存的任务上下文")
-        sources, output_dir, suffix, recursive, move_original = self.current_state_context
-        self._save_state(sources, output_dir, suffix, recursive, move_original, active)
+        sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text = self.current_state_context
+        self._save_state(sources, output_dir, suffix, recursive, move_original, move_failed, move_no_gain, temp_dir_text, active)
 
+    # 保存状态文件。active=True 表示有可恢复任务；无收益记录始终保留。
     def _save_state(
         self,
         sources: list[InputSource],
@@ -2075,6 +3139,9 @@ class AV1CompressorApp:
         suffix: str,
         recursive: bool,
         move_original: bool,
+        move_failed: bool,
+        move_no_gain: bool,
+        temp_dir_text: str,
         active: bool,
     ) -> None:
         data = {
@@ -2086,12 +3153,16 @@ class AV1CompressorApp:
             "suffix": suffix,
             "recursive": recursive,
             "move_original": move_original,
+            "move_failed": move_failed,
+            "move_no_gain": move_no_gain,
+            "temp_dir": temp_dir_text,
             "policy_version": ENCODING_POLICY_VERSION,
             "no_gain_records": self.no_gain_records,
             "tasks": [task.to_json() for task in self.tasks],
         }
         atomic_write_json(STATE_PATH, data)
 
+    # 程序启动后询问是否恢复上次未完成任务。
     def _offer_recovery(self) -> None:
         if not STATE_PATH.exists():
             return
@@ -2130,6 +3201,9 @@ class AV1CompressorApp:
         self.suffix_var.set(str(data.get("suffix", "_AV1")))
         self.recursive_var.set(bool(data.get("recursive", True)))
         self.move_original_var.set(bool(data.get("move_original", True)))
+        self.move_failed_var.set(bool(data.get("move_failed", True)))
+        self.move_no_gain_var.set(bool(data.get("move_no_gain", True)))
+        self.temp_dir_var.set(str(data.get("temp_dir", "")))
         self.log("已恢复上次输入、输出和原文件处理设置；点击“开始压制”即可重新扫描并继续。")
 
     # ---------- GUI 事件队列 ----------
@@ -2140,6 +3214,7 @@ class AV1CompressorApp:
     def _update_task_ui(self, task: Task) -> None:
         self.ui_queue.put(("update_task", task))
 
+    # 根据 FFmpeg progress 输出刷新当前文件进度和整体加权进度。
     def _update_encoding_progress(
         self,
         task: Task,
@@ -2167,6 +3242,7 @@ class AV1CompressorApp:
             (total_fraction, self.completed_count, len(self.tasks), overall_eta, speed, current_eta),
         ))
 
+    # 主线程定期处理后台线程投递的 UI 更新事件。
     def _drain_ui_queue(self) -> None:
         try:
             while True:
@@ -2178,6 +3254,7 @@ class AV1CompressorApp:
                     self.log_text.configure(state=tk.DISABLED)
                 elif kind == "current_text":
                     self.current_text.set(str(payload))
+                    self.current_detail_text.set("")
                 elif kind == "insert_task":
                     task: Task = payload
                     audio_text = self._audio_summary(task)
@@ -2205,9 +3282,9 @@ class AV1CompressorApp:
                 elif kind == "encoding_progress":
                     task, percent, speed, current_eta = payload
                     self.current_progress["value"] = percent * 100
-                    self.current_text.set(
-                        f"{Path(task.input_path).name} | {percent * 100:.1f}% | "
-                        f"速度 {speed:.2f}x | 剩余 {format_duration(current_eta)}"
+                    self.current_text.set(Path(task.input_path).name)
+                    self.current_detail_text.set(
+                        f"{percent * 100:.1f}% | 速度 {speed:.2f}x | 剩余 {format_duration(current_eta)}"
                     )
                     self._update_overall_progress(percent, speed, current_eta)
                 elif kind == "overall_progress":
@@ -2222,19 +3299,23 @@ class AV1CompressorApp:
                     self.current_progress["value"] = 100
                     self.overall_progress["value"] = 100
                     self.current_text.set(str(payload))
+                    self.current_detail_text.set("")
                     messagebox.showinfo("完成", str(payload))
                 elif kind == "stopped":
                     self._set_idle()
                     self.current_text.set(str(payload))
+                    self.current_detail_text.set("")
                 elif kind == "failed":
                     self._set_idle()
                     self.current_text.set("任务中止")
+                    self.current_detail_text.set("")
                     messagebox.showerror("任务中止", str(payload))
         except queue.Empty:
             pass
         finally:
             self.root.after(100, self._drain_ui_queue)
 
+    # 任务列表中的音频列摘要，故意很短，避免占用横向空间。
     def _audio_summary(self, task: Task) -> str:
         if not task.audio_plans:
             return "无音频"
@@ -2247,8 +3328,10 @@ class AV1CompressorApp:
         self.running = False
         self.start_button.configure(state=tk.NORMAL)
         self.stop_button.configure(state=tk.DISABLED)
+        self.optional_button.configure(state=tk.NORMAL)
         self.worker = None
 
+    # 删除文件的安全封装：不存在或删除失败都不会让主流程崩溃。
     def _safe_unlink(self, path: Path) -> None:
         try:
             if path.exists():
@@ -2256,6 +3339,7 @@ class AV1CompressorApp:
         except OSError:
             self.logger.exception("删除文件失败：%s", path)
 
+    # 关闭窗口时若正在编码，先询问并终止当前进程，保存可恢复状态。
     def _on_close(self) -> None:
         if self.running:
             if not messagebox.askyesno("退出", "当前任务仍在运行。确定停止并退出吗？"):
