@@ -33,8 +33,8 @@ except ImportError:
 # 固定目标与程序配置
 # ============================================================================
 
-APP_TITLE = "鸣潮 Steam 状态生成器（双模式轻量分支）"
-APP_VERSION = "3.2-Lite.3"
+APP_TITLE = "鸣潮 Steam 状态生成器"
+APP_VERSION = "1.0"
 
 TARGET_APP_ID = "3513350"
 TARGET_DEPOT_ID = "3513351"
