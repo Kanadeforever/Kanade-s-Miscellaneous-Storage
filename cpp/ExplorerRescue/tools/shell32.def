@@ -1,0 +1,5 @@
+LIBRARY SHELL32.dll
+EXPORTS
+SHGetKnownFolderPath
+
+Shell_NotifyIconW

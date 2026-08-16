@@ -1,0 +1,6 @@
+LIBRARY OLEAUT32.dll
+EXPORTS
+SysAllocStringLen
+SysFreeString
+SysStringLen
+VariantClear
