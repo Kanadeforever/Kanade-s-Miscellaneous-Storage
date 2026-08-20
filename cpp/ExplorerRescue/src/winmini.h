@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // Explorer Rescue 使用的最小 Win32 / COM 声明。
 // 目的：不依赖 Windows SDK 头文件和 CRT，也能在本构建环境中交叉编译原生 x64 PE。
@@ -316,6 +316,7 @@ struct IDispatch { IDispatchVtbl* lpVtbl; };
 #define PROCESS_TERMINATE 0x0001
 #define PROCESS_SYNCHRONIZE 0x00100000
 #define WAIT_OBJECT_0 0x00000000
+#define WAIT_ABANDONED 0x00000080
 #define WAIT_TIMEOUT 258
 #define INFINITE 0xFFFFFFFFUL
 #define STILL_ACTIVE 259
@@ -423,6 +424,8 @@ DLLIMPORT LPVOID WINAPI HeapReAlloc(HANDLE,DWORD,LPVOID,SIZE_T);
 DLLIMPORT BOOL WINAPI HeapFree(HANDLE,DWORD,LPVOID);
 DLLIMPORT DWORD WINAPI GetLastError();
 DLLIMPORT HANDLE WINAPI CreateMutexW(SECURITY_ATTRIBUTES*,BOOL,LPCWSTR);
+// 命名互斥量用于跨 ExplorerRescue 进程串行化 sessions.dat 写入，释放后必须调用 ReleaseMutex。
+DLLIMPORT BOOL WINAPI ReleaseMutex(HANDLE);
 DLLIMPORT BOOL WINAPI CloseHandle(HANDLE);
 DLLIMPORT DWORD WINAPI GetModuleFileNameW(HMODULE,LPWSTR,DWORD);
 DLLIMPORT LPWSTR WINAPI GetCommandLineW();

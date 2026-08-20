@@ -1,2 +1,5 @@
-﻿SHA-256  ExplorerRescue.exe
-159959066870f99112dd428efbab12806c3f99eb2923f2f964824cedff044aca
+﻿ExplorerRescue.exe SHA-256
+564f85ffd39eb64c1badde74dd9bf0f9220a045241b924b2d20252838e3ede58
+
+文件大小（字节）
+94208

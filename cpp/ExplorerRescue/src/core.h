@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "winmini.h"
 
 // Explorer Rescue 最小运行时。正式 EXE 不链接 CRT/.NET/Qt。
@@ -15,8 +15,16 @@ extern WCHAR g_configPath[32768];
 extern WCHAR g_sessionPath[32768];
 
 struct AppConfig {
+    // 后台两次自动扫描之间的间隔。这个值只决定“多久尝试一次”，不等于单轮扫描允许耗时。
     DWORD scanIntervalMs;
+
+    // 单轮扫描的独立超时。超过这个时间只判定“这一轮无效”，不会永久停止后台保护。
     DWORD scanTimeoutMs;
+
+    // 连续多少轮扫描失败以后才弹一次系统通知。成功一轮后，连续失败计数会自动清零。
+    DWORD scanNotifyAfterFailures;
+
+    // Windows 通知区域气泡/系统通知建议显示时长。
     DWORD notificationMs;
 };
 

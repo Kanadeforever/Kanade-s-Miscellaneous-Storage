@@ -3,15 +3,16 @@
 /*
 Explorer 交互核心。
 
-v0.2.7 扫描/恢复规则：
+v0.2.10 扫描/恢复规则：
 1) 捕获原语逐项等价 Mine_Exp：Shell.Application.Windows() -> Document.Folder.Self.Path + HWND。
    相同 HWND 直接归入同一个 Win11 Explorer 标签组。
 2) 不使用 CabinetWClass、FullName、Count 前后一致性来过滤 ShellWindow。
 3) 窗口位置额外保存 GetWindowRect 的真实屏幕坐标；WINDOWPLACEMENT 只保存显示状态。位置不可靠时按主显示器工作区居中常规窗口兜底。
-4) 稳定性仅在两次 Mine_Exp 等价捕获结果之间比较窗口/标签/路径语义，不比较窗口位置。
+4) 每次周期扫描只做一次 Mine_Exp 等价枚举；完整扫描超时由外层 watchdog 独立控制，不额外要求双采样一致。
 5) Win11 Explorer 标签恢复严格回到 Mine_Exp 已验证的原语：创建前记录 (HWND, LocationURL)，
    发送 ShellTabWindowClass/0xA21B 后以同 HWND 的新增 ShellWindow 为新标签，再 Navigate2。
-6) 最终校验只用于报告，不得因为校验失败关闭整个恢复窗口或销毁已经成功恢复的标签。
+6) 每个标签组的首窗口必须先通过“新 HWND 绑定 + 首路径 + 标签宿主 + 窗口响应 + 稳定期”就绪闸门，之后才允许创建第二个标签；后续标签保持快速恢复。
+7) 第一组按具体 Explorer 顶层 HWND 安全复用 Shell 重启后的单标签启动窗口；最终校验只用于报告，不得关闭失败恢复组。
 */
 
 static const UINT kNewTabCommand = 0xA21B;
@@ -153,7 +154,7 @@ BOOL ExplorerResponsive(){
     return TRUE;
 }
 
-/* ----- v0.2.6: Mine_Exp 等价恢复原语 ----- */
+/* ----- v0.2.10: Mine_Exp 等价恢复原语 + 首窗口就绪闸门 + Shell 启动窗口复用 ----- */
 
 static WCHAR* GetBrowserLocationUrl(IDispatch* browser){
     WCHAR* u=OleGetStringAlloc(browser,L"LocationURL");
@@ -161,7 +162,26 @@ static WCHAR* GetBrowserLocationUrl(IDispatch* browser){
     return u;
 }
 
-static HWND WaitForWindowByPath(IDispatch* shell,const TabState* target,DWORD timeoutMs){
+struct HwndList { HWND* p; DWORD n; DWORD cap; };
+static void HwndListFree(HwndList* l){if(!l)return;HFree(l->p);memset(l,0,sizeof(*l));}
+static BOOL HwndListContains(const HwndList* l,HWND hwnd){if(!l)return FALSE;for(DWORD i=0;i<l->n;++i)if(l->p[i]==hwnd)return TRUE;return FALSE;}
+static BOOL HwndListAddUnique(HwndList* l,HWND hwnd){
+    if(!l||!hwnd)return TRUE;if(HwndListContains(l,hwnd))return TRUE;
+    if(l->n>=l->cap){DWORD nc=l->cap?l->cap*2:8;HWND* p=(HWND*)HReAlloc(l->p,nc*sizeof(HWND),TRUE);if(!p)return FALSE;l->p=p;l->cap=nc;}
+    l->p[l->n++]=hwnd;return TRUE;
+}
+static BOOL CaptureExplorerHwndList(IDispatch* shell,HwndList* out){
+    memset(out,0,sizeof(*out));IDispatch* ws=GetShellWindows(shell);if(!ws)return FALSE;LONGLONG c=0;if(!OleGetLong64(ws,L"Count",&c)){OleRelease(ws);return FALSE;}
+    for(LONG i=0;i<(LONG)c;++i){IDispatch* b=OleCallDispatchI4(ws,L"Item",i);if(!b)continue;HWND h=0;if(GetBrowserHwnd(b,&h)&&h&&!HwndListAddUnique(out,h)){OleRelease(b);OleRelease(ws);HwndListFree(out);return FALSE;}OleRelease(b);}
+    OleRelease(ws);return TRUE;
+}
+
+/*
+首窗口不能只按路径查找：如果两个标签组的首路径相同，或者新窗口注册尚未完成，
+按路径可能误命中前面已经恢复好的 Explorer 窗口，随后把标签添加到错误的组。
+因此创建窗口前记录全部现有 Explorer HWND，只接受“创建之后新出现 + 路径匹配”的 HWND。
+*/
+static HWND WaitForNewWindowByPath(IDispatch* shell,const TabState* target,const HwndList* before,DWORD timeoutMs){
     ULONGLONG start=GetTickCount64();
     while(GetTickCount64()-start<timeoutMs){
         IDispatch* ws=GetShellWindows(shell);
@@ -172,7 +192,7 @@ static HWND WaitForWindowByPath(IDispatch* shell,const TabState* target,DWORD ti
                     IDispatch* b=OleCallDispatchI4(ws,L"Item",i);
                     if(!b)continue;
                     HWND h=0;
-                    if(GetBrowserHwnd(b,&h)&&h&&BrowserLocationEquals(b,target)){
+                    if(GetBrowserHwnd(b,&h)&&h&&!HwndListContains(before,h)&&BrowserLocationEquals(b,target)){
                         OleRelease(b);OleRelease(ws);return h;
                     }
                     OleRelease(b);
@@ -247,6 +267,56 @@ static BOOL EnumerateBrowsersForHwnd(IDispatch* shell,HWND hwnd,BrowserRefList* 
     }
     OleRelease(ws);return TRUE;
 }
+
+static BOOL TryGetBrowserBusy(IDispatch* browser,BOOL* busy){
+    if(busy)*busy=FALSE;VARIANT r;HRESULT hr=OleInvoke(browser,L"Busy",DISPATCH_PROPERTYGET,0,0,&r);if(FAILED(hr))return FALSE;BOOL ok=TRUE;BOOL v=FALSE;
+    if(r.vt==VT_BOOL)v=r.data.boolVal!=0;
+    else if(r.vt==VT_I2)v=r.data.iVal!=0;
+    else if(r.vt==VT_I4||r.vt==VT_INT)v=r.data.lVal!=0;
+    else ok=FALSE;
+    VariantClear(&r);if(ok&&busy)*busy=v;return ok;
+}
+
+/*
+首窗口就绪闸门。
+
+“Shell.Windows 已能返回 HWND/Path”只能说明窗口对象已经注册，并不代表 Win11 Explorer 的
+标签宿主和首个 ShellView 已经完成初始化。过早发送 0xA21B 会与 Explorer 自己的初始化竞争，
+表现为标签被加到错误阶段、标签组被破坏或最终整组校验失败。
+
+通过条件：
+- 顶层窗口与 ShellTabWindowClass 均可响应；
+- 同 HWND 当前只有首个标签，且实际路径已经到达目标；
+- IWebBrowser2.Busy 若可读取则必须为 false；
+- 以上状态连续稳定至少 1200 ms。
+
+超时只表示本组首窗口未能安全进入“可加标签”状态。调用方必须保留已经打开的首窗口，
+但不得继续向它创建标签，避免恢复器自身破坏会话结构。
+*/
+static BOOL WaitForFirstWindowReady(IDispatch* shell,HWND hwnd,const TabState* first,DWORD timeoutMs){
+    ULONGLONG start=GetTickCount64(),stableSince=0;HWND stableHost=0;
+    while(GetTickCount64()-start<timeoutMs){
+        BOOL ready=TRUE;DWORD_PTR ignored=0;
+        if(!SendMessageTimeoutW(hwnd,WM_NULL,0,0,SMTO_ABORTIFHUNG|SMTO_BLOCK,150,&ignored))ready=FALSE;
+        HWND host=FindWindowExW(hwnd,0,L"ShellTabWindowClass",0);
+        if(!host||!SendMessageTimeoutW(host,WM_NULL,0,0,SMTO_ABORTIFHUNG|SMTO_BLOCK,150,&ignored))ready=FALSE;
+        BrowserRefList list;memset(&list,0,sizeof(list));
+        if(ready&&!EnumerateBrowsersForHwnd(shell,hwnd,&list))ready=FALSE;
+        if(ready&&list.n!=1)ready=FALSE;
+        if(ready&&list.n==1){
+            if(!BrowserLocationEquals(list.p[0],first))ready=FALSE;
+            BOOL busy=FALSE;if(ready&&TryGetBrowserBusy(list.p[0],&busy)&&busy)ready=FALSE;
+        }
+        BrowserRefListFree(&list);
+        ULONGLONG now=GetTickCount64();
+        if(ready){
+            if(!stableSince||stableHost!=host){stableSince=now;stableHost=host;}
+            else if(now-stableSince>=1200)return TRUE;
+        }else{stableSince=0;stableHost=0;}
+        Sleep(80);
+    }
+    return FALSE;
+}
 static BOOL CaptureBrowserKeys(IDispatch* shell,BrowserKeyList* out){
     memset(out,0,sizeof(*out));IDispatch* ws=GetShellWindows(shell);if(!ws)return FALSE;LONGLONG c=0;if(!OleGetLong64(ws,L"Count",&c)){OleRelease(ws);return FALSE;}
     for(LONG i=0;i<(LONG)c;++i){
@@ -298,10 +368,112 @@ static BOOL RestoreTabIntoWindowMineExp(IDispatch* shell,HWND hwnd,const TabStat
     return ok;
 }
 
-static HWND OpenGroupWindow(IDispatch* shell,const TabState* first){
-    if(!ShellOpenLocation(shell,first))return 0;
-    HWND h=WaitForWindowByPath(shell,first,8000);
-    if(h)WaitForTabHost(h,6000);
+/*
+Windows 11 在重启 Shell 的竞态窗口中，可能已经出现一个系统启动产生的单标签 Explorer 窗口
+（常见表现为 Home/此电脑）。如果恢复器无视它，再 Shell.Open() 第一个会话组，就会留下一个
+多余的“此电脑”窗口。
+
+这里不按标题/本地化名称猜测，而只接受一个足够保守的结构条件：
+- 当前 Shell.Windows() 只对应 1 个唯一 Explorer HWND；
+- 该 HWND 当前只对应 1 个 ShellWindow/标签；
+- HWND 是普通 Explorer 顶层窗口；
+- 窗口/标签宿主可在后续就绪闸门中正常响应。
+
+满足时直接复用其唯一标签导航到第一组首路径。若导航失败，返回这个 HWND 且 outReady=FALSE，
+调用方会保留它并报告本组失败，不再额外新建第二个窗口，从而避免“此电脑 + 恢复窗口”双窗口。
+*/
+static BOOL CaptureVisibleExplorerFrames(HwndList* out){
+    memset(out,0,sizeof(*out));
+    const WCHAR* classes[2]={L"CabinetWClass",L"ExploreWClass"};
+    for(int ci=0;ci<2;++ci){
+        HWND after=0;
+        for(;;){
+            HWND h=FindWindowExW(0,after,classes[ci],0);
+            if(!h)break;
+            after=h;
+            if(!HwndListAddUnique(out,h)){HwndListFree(out);return FALSE;}
+        }
+    }
+    return TRUE;
+}
+
+/*
+Windows 11 重启 Shell 后可能先产生一个默认的单标签 Explorer frame（常见为 Home/此电脑）。
+v0.2.9 错误地要求 Shell.Windows() 中“全局只有一个唯一 Explorer HWND”，这在实机上过严：
+Shell.Windows() 可能同时包含其他 Shell 条目，于是明明已经可见的默认窗口不会被识别，随后又 Shell.Open()
+创建第一组，最终留下一个独立的“此电脑”。
+
+v0.2.10 改为以“具体顶层 Explorer frame”为候选：
+- 直接枚举当前可见/已创建的 CabinetWClass / ExploreWClass 顶层 HWND；
+- 对每个 HWND 单独检查 Shell.Windows() 是否恰好对应 1 个标签；
+- 顶层窗口必须可响应；
+- 一旦找到安全候选，就直接复用其唯一标签导航到第一组首路径；
+- 不再要求全局唯一，也不受其他 Shell 条目影响。
+
+此函数只在恢复第一组之前调用，因此此时尚不存在本程序创建的恢复窗口；这里看到的 Explorer frame
+只能来自本轮新 Shell 的 bootstrap/默认启动阶段。若候选暂时只创建了 HWND、尚未注册进 Shell.Windows()，
+会继续等待到 waitMs，而不是马上放弃并新建第二个窗口。
+*/
+static HWND TryReuseBootstrapWindow(IDispatch* shell,const TabState* first,BOOL* outReady,DWORD waitMs){
+    if(outReady)*outReady=FALSE;
+    ULONGLONG start=GetTickCount64();
+    for(;;){
+        HwndList frames;
+        if(CaptureVisibleExplorerFrames(&frames)){
+            for(DWORD fi=0;fi<frames.n;++fi){
+                HWND h=frames.p[fi];DWORD_PTR ignored=0;
+                if(!SendMessageTimeoutW(h,WM_NULL,0,0,SMTO_ABORTIFHUNG|SMTO_BLOCK,150,&ignored))continue;
+
+                BrowserRefList tabs;memset(&tabs,0,sizeof(tabs));
+                if(!EnumerateBrowsersForHwnd(shell,h,&tabs))continue;
+                if(tabs.n!=1){BrowserRefListFree(&tabs);continue;}
+
+                IDispatch* onlyBrowser=tabs.p[0];tabs.p[0]=0;BrowserRefListFree(&tabs);
+                BOOL reached=BrowserLocationEquals(onlyBrowser,first);
+                for(int attempt=0;attempt<3&&!reached;++attempt){
+                    if(NavigateBrowserMineExp(shell,onlyBrowser,first))
+                        reached=WaitBrowserAtTarget(onlyBrowser,first,4500);
+                    if(!reached)Sleep(120);
+                }
+                OleRelease(onlyBrowser);
+                if(!reached){HwndListFree(&frames);return h;}
+
+                BOOL ready=WaitForFirstWindowReady(shell,h,first,10000);
+                if(outReady)*outReady=ready;
+                HwndListFree(&frames);
+                return h;
+            }
+            HwndListFree(&frames);
+        }
+        if(GetTickCount64()-start>=waitMs)break;
+        Sleep(50);
+    }
+    return 0;
+}
+
+static HWND OpenGroupWindow(IDispatch* shell,const TabState* first,BOOL allowBootstrap,BOOL* outReady){
+    if(outReady)*outReady=FALSE;
+
+    /*
+    仅第一组允许复用 Shell 启动窗口。任务栏恢复后通常这个窗口已经注册；额外最多等 2200 ms，
+    用来覆盖 explorer.exe/系统 Shell 双方初始化的轻微竞态。若不存在安全候选，则走原来的新建流程。
+    */
+    if(allowBootstrap){
+        BOOL ready=FALSE;
+        HWND bootstrap=TryReuseBootstrapWindow(shell,first,&ready,2200);
+        if(bootstrap){
+            if(outReady)*outReady=ready;
+            return bootstrap;
+        }
+    }
+
+    HwndList before;if(!CaptureExplorerHwndList(shell,&before))return 0;
+    if(!ShellOpenLocation(shell,first)){HwndListFree(&before);return 0;}
+    HWND h=WaitForNewWindowByPath(shell,first,&before,8000);HwndListFree(&before);
+    if(!h)return 0;
+    /* 第一个窗口必须完全完成初始化后才允许创建第二个标签。这里宁可把本组报告失败，也不抢跑破坏标签组。 */
+    BOOL ready=WaitForFirstWindowReady(shell,h,first,10000);
+    if(outReady)*outReady=ready;
     return h;
 }
 
@@ -345,10 +517,15 @@ static BOOL ValidateGroup(IDispatch* shell,HWND hwnd,const WindowState* expected
     HFree(used);BrowserRefListFree(&list);return ok;
 }
 
-static BOOL RestoreOneGroup(IDispatch* shell,const WindowState* w,HWND* outHwnd){
+static BOOL RestoreOneGroup(IDispatch* shell,const WindowState* w,BOOL allowBootstrap,HWND* outHwnd){
     if(outHwnd)*outHwnd=0;if(!w||!w->tabCount)return FALSE;
-    HWND hwnd=OpenGroupWindow(shell,&w->tabs[0]);if(!hwnd)return FALSE;if(outHwnd)*outHwnd=hwnd;
-    /* 恢复标签期间保持窗口可操作；最终再恢复最小化/最大化/普通位置，避免最小化状态干扰标签宿主命令。 */
+    BOOL firstReady=FALSE;HWND hwnd=OpenGroupWindow(shell,&w->tabs[0],allowBootstrap,&firstReady);if(!hwnd)return FALSE;if(outHwnd)*outHwnd=hwnd;
+    /*
+    首窗口是每个标签组的硬闸门。未完全就绪时绝不继续发送新建标签命令；
+    保留已经正确打开的首窗口并恢复其几何，历史会话也不会被失败状态覆盖。
+    */
+    if(!firstReady){ApplyWindowGeometry(hwnd,w);return FALSE;}
+    /* 恢复标签期间保持窗口可操作；首窗口闸门通过后，后续标签继续使用现有快速创建/导航流程。 */
     BOOL createdAll=TRUE;
     for(DWORD ti=1;ti<w->tabCount;++ti){
         BOOL tabOk=FALSE;for(int attempt=0;attempt<2&&!tabOk;++attempt)tabOk=RestoreTabIntoWindowMineExp(shell,hwnd,&w->tabs[ti]);
@@ -364,31 +541,78 @@ static BOOL RestoreOneGroup(IDispatch* shell,const WindowState* w,HWND* outHwnd)
 BOOL RestoreExplorerSnapshot(const Snapshot* s,RestoreStats* stats){
     if(stats)memset(stats,0,sizeof(*stats));if(!s)return FALSE;if(stats){stats->expectedWindows=s->windowCount;stats->expectedTabs=SnapshotTotalTabs(s);}
     HRESULT ci=CoInitializeEx(0,COINIT_APARTMENTTHREADED);BOOL uninit=SUCCEEDED(ci);IDispatch* shell=OleCreateProgID(L"Shell.Application");if(!shell){if(uninit)CoUninitialize();return FALSE;}
+    /* 记录恢复开始前已经由新 Shell 产生的顶层 Explorer frame。旧 Explorer 已在此前被结束，
+       因此这些 HWND 只可能属于本轮 bootstrap/默认启动阶段。正常情况会复用其中一个作为第一组；
+       如果由于注册竞态没有复用，但全部会话最终恢复成功，则只清理这些“恢复前就存在且未被使用”的残留 frame。 */
+    HwndList bootstrapFrames;memset(&bootstrapFrames,0,sizeof(bootstrapFrames));CaptureVisibleExplorerFrames(&bootstrapFrames);
     HWND* restored=(HWND*)HAlloc((s->windowCount?s->windowCount:1)*sizeof(HWND),TRUE);BOOL all=restored!=0;
+    BOOL allowBootstrap=TRUE;
     for(DWORD wi=0;wi<s->windowCount&&restored;++wi){
         const WindowState* w=&s->windows[wi];if(!w->tabCount)continue;HWND hwnd=0;
-        BOOL valid=RestoreOneGroup(shell,w,&hwnd);restored[wi]=hwnd;
+        BOOL valid=RestoreOneGroup(shell,w,allowBootstrap,&hwnd);allowBootstrap=FALSE;restored[wi]=hwnd;
         if(stats){if(valid){++stats->restoredWindows;stats->restoredTabs+=w->tabCount;}else{++stats->failedWindows;stats->failedTabs+=w->tabCount;++stats->validationFailures;}}
         if(!valid)all=FALSE;
     }
     /* Win11 Explorer 在窗口/标签初始化完成后仍可能异步调整 frame。所有组完成后再次写回位置，避免 Shell 覆盖第一次定位。 */
-    if(restored){Sleep(650);for(DWORD wi=0;wi<s->windowCount;++wi)if(restored[wi])ApplyWindowGeometry(restored[wi],&s->windows[wi]);HFree(restored);}
+    if(restored){
+        Sleep(650);for(DWORD wi=0;wi<s->windowCount;++wi)if(restored[wi])ApplyWindowGeometry(restored[wi],&s->windows[wi]);
+        /* 仅在全部窗口/标签都校验成功时清理未被复用的 bootstrap frame。失败恢复绝不做破坏性清理。
+           这些 HWND 是 RestoreExplorerSnapshot() 入口时就存在、且不属于任何 restored[] 的新 Shell 启动窗口，
+           因而不会误删本次恢复出的真实会话窗口。 */
+        if(all){
+            for(DWORD bi=0;bi<bootstrapFrames.n;++bi){
+                HWND h=bootstrapFrames.p[bi];BOOL used=FALSE;
+                for(DWORD wi=0;wi<s->windowCount;++wi)if(restored[wi]==h){used=TRUE;break;}
+                if(!used){
+                    BrowserRefList tabs;memset(&tabs,0,sizeof(tabs));
+                    if(EnumerateBrowsersForHwnd(shell,h,&tabs)&&tabs.n==1)PostMessageW(h,WM_CLOSE,0,0);
+                    BrowserRefListFree(&tabs);
+                }
+            }
+        }
+        HFree(restored);
+    }
+    HwndListFree(&bootstrapFrames);
     OleRelease(shell);if(uninit)CoUninitialize();return all;
 }
 
 static BOOL SameExeName(const WCHAR* a,const WCHAR* b){return WEqualI(a,b);}
 static BOOL KillExplorerProcesses(){DWORD mySession=0;ProcessIdToSessionId(GetCurrentProcessId(),&mySession);HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);if(snap==INVALID_HANDLE_VALUE)return FALSE;HANDLE waits[128];DWORD waitCount=0;PROCESSENTRY32W pe;memset(&pe,0,sizeof(pe));pe.dwSize=sizeof(pe);BOOL any=FALSE;if(Process32FirstW(snap,&pe)){do{if(SameExeName(pe.szExeFile,L"explorer.exe")){DWORD sid=0;if(ProcessIdToSessionId(pe.th32ProcessID,&sid)&&sid==mySession){HANDLE p=OpenProcess(PROCESS_TERMINATE|PROCESS_SYNCHRONIZE,FALSE,pe.th32ProcessID);if(p){if(TerminateProcess(p,0)){any=TRUE;if(waitCount<128)waits[waitCount++]=p;else CloseHandle(p);}else CloseHandle(p);}}}}while(Process32NextW(snap,&pe));}CloseHandle(snap);for(DWORD i=0;i<waitCount;++i){WaitForSingleObject(waits[i],3000);CloseHandle(waits[i]);}return any;}
+static BOOL SessionHasExplorerProcess(){
+    DWORD mySession=0;if(!ProcessIdToSessionId(GetCurrentProcessId(),&mySession))return FALSE;
+    HANDLE snap=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);if(snap==INVALID_HANDLE_VALUE)return FALSE;
+    PROCESSENTRY32W pe;memset(&pe,0,sizeof(pe));pe.dwSize=sizeof(pe);BOOL found=FALSE;
+    if(Process32FirstW(snap,&pe)){
+        do{
+            if(SameExeName(pe.szExeFile,L"explorer.exe")){
+                DWORD sid=0;
+                if(ProcessIdToSessionId(pe.th32ProcessID,&sid)&&sid==mySession){found=TRUE;break;}
+            }
+        }while(Process32NextW(snap,&pe));
+    }
+    CloseHandle(snap);return found;
+}
+
 static BOOL StartExplorerImmediately(){
     /*
-    v0.2.7：旧版会先等待 1.2 秒，赌 Windows 自己重启 Shell；如果系统没有立刻自动拉起 explorer.exe，
-    这段等待会直接表现为任务栏迟迟不回来。既然 KillExplorerProcesses() 已经等待旧 Explorer 退出，
-    这里应立即启动新的 Shell。Explorer 自身具有单实例/壳层接管语义，即使 Windows 同时尝试自动重启，
-    也不需要我们人为空等。
+    v0.2.10：v0.2.7 为了加快任务栏恢复，旧 Explorer 退出后立刻 CreateProcess(explorer.exe)。
+    但 Windows 自己也可能在崩溃/终止后极快地重新拉起 Shell；两者发生竞态时，第二次 explorer.exe
+    调用可能被解释为“再打开一个文件资源管理器窗口”，表现为恢复前先冒出一个 Home/此电脑窗口。
+
+    这里仅给系统自动重拉一个非常短的 250 ms 进程级宽限：
+    - 只要同一 Session 已经出现新的 explorer.exe 进程，就不再二次启动；
+    - 250 ms 内没有出现，立即由本程序启动。
+    相比旧 v0.2.6 的 1.2 秒固定等待，任务栏恢复仍然快得多；同时显著降低双启动竞态。
     */
     HWND tray=FindWindowW(L"Shell_TrayWnd",0);
     if(tray){
         DWORD_PTR r=0;
         if(SendMessageTimeoutW(tray,WM_NULL,0,0,SMTO_ABORTIFHUNG|SMTO_BLOCK,80,&r))return TRUE;
+    }
+    ULONGLONG graceStart=GetTickCount64();
+    while(GetTickCount64()-graceStart<250){
+        if(SessionHasExplorerProcess())return TRUE;
+        Sleep(25);
     }
     WCHAR* win=(WCHAR*)HAlloc(1024*sizeof(WCHAR),TRUE);
     WCHAR* cmd=(WCHAR*)HAlloc(1200*sizeof(WCHAR),TRUE);

@@ -1,7 +1,7 @@
-#include "core.h"
+﻿#include "core.h"
 
 /*
-Explorer Rescue v0.2.6 便携运行时：
+Explorer Rescue v0.2.11 便携运行时：
 - 所有持久数据只放 EXE 同目录；目录不可写就明确失败，不回退 AppData，不写注册表。
 - 首次运行只生成 config.ini 与 sessions.dat，因此运行目录始终只有三个运行时文件。
 - config.ini 为 UTF-16LE，便于 Windows 记事本直接编辑；修改后重启程序生效。
@@ -40,14 +40,17 @@ static const WCHAR kDefaultConfig[] =
     L"\xFEFF; Explorer Rescue 配置文件\r\n"
     L"; 修改后请退出并重新运行 ExplorerRescue.exe。\r\n"
     L"; 程序固定保留最近 5 个不同的完整有效会话；完全相同的扫描不会重复占用历史槽。\r\n"
-    L"; 扫描一旦连续重试仍无法完整读取全部窗口/标签，会自动暂停，防止残缺数据覆盖历史。\r\n"
+    L"; 单轮扫描失败只会丢弃本轮并自动重试；最近 5 个有效历史不会被残缺扫描覆盖。\r\n"
+    L"; 只有 Explorer 恢复本身失败时才会进入保护性暂停，避免把残缺恢复状态写进历史。\r\n"
     L"\r\n[Scan]\r\n"
     L"; 后台完整扫描间隔。建议 5~60 秒。\r\n"
     L"IntervalSeconds=5\r\n"
-    L"; 完整扫描独立超时，与 IntervalSeconds 无关。建议保持默认 20000。\r\n"
+    L"; 完整扫描独立超时，与 IntervalSeconds 无关。超时只丢弃当前轮，之后仍会自动重试。\r\n"
     L"TimeoutMilliseconds=20000\r\n"
+    L"; 连续多少轮扫描失败后才通知一次。中间只要成功一轮就会清零。\r\n"
+    L"NotifyAfterConsecutiveFailures=3\r\n"
     L"\r\n[Notification]\r\n"
-    L"; 扫描暂停通知显示时间。\r\n"
+    L"; 系统通知建议显示时间。\r\n"
     L"DurationSeconds=8\r\n";
 
 BOOL EnsurePortableFiles(){
@@ -62,7 +65,29 @@ BOOL EnsurePortableFiles(){
 }
 
 static DWORD Clamp(DWORD v,DWORD lo,DWORD hi,DWORD defv){if(v<lo||v>hi)return defv;return v;}
-void LoadAppConfig(AppConfig*cfg){if(!cfg)return;DWORD sec=GetPrivateProfileIntW(L"Scan",L"IntervalSeconds",5,g_configPath);DWORD timeout=GetPrivateProfileIntW(L"Scan",L"TimeoutMilliseconds",20000,g_configPath);DWORD notify=GetPrivateProfileIntW(L"Notification",L"DurationSeconds",8,g_configPath);sec=Clamp(sec,5,600,5);timeout=Clamp(timeout,10000,120000,20000);notify=Clamp(notify,3,30,8);cfg->scanIntervalMs=sec*1000;cfg->scanTimeoutMs=timeout;cfg->notificationMs=notify*1000;}
+void LoadAppConfig(AppConfig*cfg){
+    if(!cfg)return;
+
+    // IntervalSeconds 只控制周期，不再与“扫描失败后是否永久暂停”绑定。
+    DWORD sec=GetPrivateProfileIntW(L"Scan",L"IntervalSeconds",5,g_configPath);
+
+    // 仍保留独立 watchdog。这里继续兼容已有 config.ini 的 20000 ms 默认值。
+    DWORD timeout=GetPrivateProfileIntW(L"Scan",L"TimeoutMilliseconds",20000,g_configPath);
+
+    // 新增连续失败通知阈值。旧配置没有这一项时自动使用 3，不需要用户手工迁移。
+    DWORD notifyAfter=GetPrivateProfileIntW(L"Scan",L"NotifyAfterConsecutiveFailures",3,g_configPath);
+    DWORD notify=GetPrivateProfileIntW(L"Notification",L"DurationSeconds",8,g_configPath);
+
+    sec=Clamp(sec,5,600,5);
+    timeout=Clamp(timeout,10000,120000,20000);
+    notifyAfter=Clamp(notifyAfter,1,60,3);
+    notify=Clamp(notify,3,30,8);
+
+    cfg->scanIntervalMs=sec*1000;
+    cfg->scanTimeoutMs=timeout;
+    cfg->scanNotifyAfterFailures=notifyAfter;
+    cfg->notificationMs=notify*1000;
+}
 
 void BufferInit(ByteBuffer*b){b->data=0;b->size=0;b->cap=0;}
 void BufferFree(ByteBuffer*b){if(b&&b->data)HFree(b->data);if(b){b->data=0;b->size=b->cap=0;}}
