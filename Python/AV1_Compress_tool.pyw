@@ -20,6 +20,9 @@ AV1 压制工具
 - 单视频内部异常隔离：一个文件或验证器异常不会终止整个无人值守队列
 - 编码与完整解码验证均带无进度看门狗，真正卡死时可自动终止并记录位置
 - 中断恢复会保留“待修复”阶段，避免重启后重复一次已知失败的标准整片压制
+- Windows 下可统一限制本程序启动的 FFmpeg/ffprobe 优先级和整数 CPU 硬上限；普通编码不加入 lp，既定压制与验证标准不变
+- 设置窗口采用双列布局，低分辨率屏幕也能完整显示主要配置
+- “额外功能”提供源视频与 AV1 成品的单文件/文件夹严格验证；严重问题与时间戳警告分级报告
 - 首次运行自动生成同名 JSON 配置模板
 
 依赖：Python 3.10+（通常自带 tkinter）、FFmpeg、ffprobe。
@@ -47,6 +50,8 @@ AV1 压制工具
 
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
 import hashlib
 import json
 import logging
@@ -82,8 +87,8 @@ LOG_PATH = SCRIPT_DIR / f"{APP_STEM}.log"
 STATE_PATH = SCRIPT_DIR / f"{APP_STEM}.state.json"
 
 STATE_SCHEMA_VERSION = 2
-CONFIG_SCHEMA_VERSION = 1
-ENCODING_POLICY_VERSION = "av1-svt-p5-pixel-crf-opus-128-192-v2-old-output-scan"
+CONFIG_SCHEMA_VERSION = 2
+ENCODING_POLICY_VERSION = "av1-svt-p5-pixel-crf-opus-128-192-v3-ignore-attached-pic"
 QUICK_FINGERPRINT_VERSION = "sha256-sparse-v1"
 QUICK_FINGERPRINT_CHUNK_SIZE = 256 * 1024
 QUICK_FINGERPRINT_SAMPLE_COUNT = 5
@@ -97,6 +102,36 @@ TEMP_WORK_DIRNAME = "_压制临时文件"
 # 完整解码验证阶段放宽到 10 分钟，避免大型文件或磁盘较慢时误杀。
 ENCODING_STALL_TIMEOUT_SECONDS = 300.0
 VERIFY_STALL_TIMEOUT_SECONDS = 600.0
+
+# 额外功能中的“严格验证”会先让 ffprobe 完整遍历容器数据，再让 FFmpeg
+# 严格解码全部动态视频流和音频流。这里仅限制“媒体时间完全不前进”的情况，
+# 不限制正常的大文件验证总时长。
+STRICT_VERIFY_STALL_TIMEOUT_SECONDS = 600.0
+STRICT_PROBE_TIMEOUT_SECONDS = 6 * 60 * 60
+
+# 严格验证中，FFmpeg 的 null 输出器可能报告“DTS 非严格递增”。这类信息来自
+# 验证输出端的时间戳检查，不能单独证明 AV1 码流损坏。它仍然值得提示用户，
+# 但必须与真正的解码错误、截断和提前结束分开统计。
+STRICT_TIMESTAMP_WARNING_PATTERNS = (
+    "application provided invalid, non monotonically increasing dts to muxer",
+    "non-monotonically increasing dts",
+    "non monotonically increasing dts",
+    "non-monotonous dts",
+)
+
+# 当 null 输出器因 DTS 问题报告错误时，FFmpeg 可能继续打印下面这些“后果性”信息。
+# 如果本次 stderr 中存在明确的 DTS 警告，并且除这些后果性信息外没有其他错误，
+# 则整体仍归类为“时间戳警告”，而不是误报为码流损坏。
+STRICT_TIMESTAMP_DERIVATIVE_PATTERNS = (
+    "error muxing a packet",
+    "error writing trailer",
+    "error closing file",
+    "conversion failed",
+    "task finished with error code",
+    "terminating thread with return code",
+)
+
+STRICT_TIMESTAMP_SAMPLE_LIMIT = 6
 
 # DEFAULT_SETTINGS 是“可长期保存的用户偏好”。
 # 这些值会写入同名 JSON，例如 AV1_Compress_tool.json。
@@ -141,6 +176,11 @@ DEFAULT_SETTINGS = {
     "failure_probe_post_seconds": 90.0,
     # 单个文件最多定位几个新的失败点，避免极端文件无限循环。
     "failure_probe_max_points": 3,
+    # 日常资源控制只作用于 Windows 调度层，不修改 SVT-AV1 编码参数。
+    # 普通编码路径明确不自动加入 lp；lp=4 只保留给失败后的兼容性回退。
+    "process_priority": "below_normal",
+    "cpu_limit_enabled": True,
+    "cpu_limit_percent": 70,
 }
 
 
@@ -172,6 +212,11 @@ def grouped_settings_from_flat(settings: dict[str, Any]) -> dict[str, Any]:
             "failure_probe_post_seconds": normalized["failure_probe_post_seconds"],
             "failure_probe_max_points": normalized["failure_probe_max_points"],
         },
+        "resources": {
+            "process_priority": normalized["process_priority"],
+            "cpu_limit_enabled": normalized["cpu_limit_enabled"],
+            "cpu_limit_percent": normalized["cpu_limit_percent"],
+        },
         "temp": {
             "work_dir": normalized["temp_dir"],
         },
@@ -191,6 +236,7 @@ def flat_settings_from_grouped(raw: Any) -> dict[str, Any]:
     classification = raw.get("classification") if isinstance(raw.get("classification"), dict) else {}
     precheck = raw.get("precheck") if isinstance(raw.get("precheck"), dict) else {}
     repair = raw.get("repair") if isinstance(raw.get("repair"), dict) else {}
+    resources = raw.get("resources") if isinstance(raw.get("resources"), dict) else {}
     temp = raw.get("temp") if isinstance(raw.get("temp"), dict) else {}
 
     if "filename_suffix" in output:
@@ -222,6 +268,13 @@ def flat_settings_from_grouped(raw: Any) -> dict[str, Any]:
         settings["failure_probe_post_seconds"] = repair["failure_probe_post_seconds"]
     if "failure_probe_max_points" in repair:
         settings["failure_probe_max_points"] = repair["failure_probe_max_points"]
+
+    if "process_priority" in resources:
+        settings["process_priority"] = resources["process_priority"]
+    if "cpu_limit_enabled" in resources:
+        settings["cpu_limit_enabled"] = resources["cpu_limit_enabled"]
+    if "cpu_limit_percent" in resources:
+        settings["cpu_limit_percent"] = resources["cpu_limit_percent"]
 
     if "work_dir" in temp:
         settings["temp_dir"] = temp["work_dir"]
@@ -256,6 +309,11 @@ CONFIG_TEMPLATE = {
             "failure_probe_pre_seconds": 30.0,
             "failure_probe_post_seconds": 90.0,
             "failure_probe_max_points": 3,
+        },
+        "resources": {
+            "process_priority": "below_normal",
+            "cpu_limit_enabled": True,
+            "cpu_limit_percent": 70,
         },
         "temp": {
             "work_dir": "",
@@ -295,6 +353,40 @@ BENIGN_TIMESTAMP_PATTERNS = (
 )
 
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+# Windows 进程优先级只提供适合后台编码的三个等级。
+# 不提供“高”和“实时”，避免无人值守时反过来抢占系统关键线程。
+PROCESS_PRIORITY_VALUES = {"idle", "below_normal", "normal"}
+PROCESS_PRIORITY_LABELS = {
+    "idle": "空闲",
+    "below_normal": "低于正常",
+    "normal": "正常",
+}
+PROCESS_PRIORITY_FROM_LABEL = {label: value for value, label in PROCESS_PRIORITY_LABELS.items()}
+WINDOWS_PRIORITY_CLASSES = {
+    "idle": 0x00000040,
+    "below_normal": 0x00004000,
+    "normal": 0x00000020,
+}
+
+# Job Object CPU rate control 常量。CpuRate 使用“百分比 × 100”，
+# 例如 70% 写为 7000。该限制属于 Windows 调度层，不改变 FFmpeg/SVT 参数。
+JOB_OBJECT_CPU_RATE_CONTROL_ENABLE = 0x1
+JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP = 0x4
+JOB_OBJECT_CPU_RATE_CONTROL_INFORMATION_CLASS = 15
+
+
+class JOBOBJECT_CPU_RATE_CONTROL_INFORMATION(ctypes.Structure):
+    """ctypes 对应的 Windows JOBOBJECT_CPU_RATE_CONTROL_INFORMATION。
+
+    原生结构第二个成员是 union；硬上限模式只使用其中的 DWORD CpuRate，
+    因此 Python 侧按两个连续 DWORD 声明即可，大小和内存布局保持一致。
+    """
+
+    _fields_ = [
+        ("ControlFlags", wintypes.DWORD),
+        ("CpuRate", wintypes.DWORD),
+    ]
 
 
 # ----------------------------- 代码阅读索引 -----------------------------
@@ -511,6 +603,25 @@ def normalize_settings(raw: Any) -> dict[str, Any]:
     settings["failure_point_probe_enabled"] = bool(settings.get("failure_point_probe_enabled", True))
     settings["compatibility_fallback_enabled"] = bool(settings.get("compatibility_fallback_enabled", False))
     settings["two_stage_queue_enabled"] = bool(settings.get("two_stage_queue_enabled", True))
+    priority = str(settings.get("process_priority", "below_normal")).strip().lower()
+    settings["process_priority"] = priority if priority in PROCESS_PRIORITY_VALUES else "below_normal"
+    settings["cpu_limit_enabled"] = bool(settings.get("cpu_limit_enabled", True))
+
+    # GUI 和新配置只接受整数百分比。Windows Job Object 的 CpuRate 本身是整数，
+    # 单位为“百分比 × 100”；虽然底层能够表达小数百分比，本工具没有必要暴露
+    # 这种精度。这里允许旧的 70.0 这类“数值上为整数”的值自动规范为 70，
+    # 但 70.5、字符串小数、布尔值等均回退到默认值。
+    raw_cpu_limit = settings.get("cpu_limit_percent", 70)
+    cpu_limit_percent = 70
+    if isinstance(raw_cpu_limit, bool):
+        cpu_limit_percent = 70
+    elif isinstance(raw_cpu_limit, int):
+        cpu_limit_percent = raw_cpu_limit
+    elif isinstance(raw_cpu_limit, float) and math.isfinite(raw_cpu_limit) and raw_cpu_limit.is_integer():
+        cpu_limit_percent = int(raw_cpu_limit)
+    elif isinstance(raw_cpu_limit, str) and raw_cpu_limit.strip().isdigit():
+        cpu_limit_percent = int(raw_cpu_limit.strip())
+    settings["cpu_limit_percent"] = min(max(cpu_limit_percent, 10), 100)
     for _key, _default, _min, _max in (
         ("failure_probe_pre_seconds", 30.0, 0.0, 600.0),
         ("failure_probe_post_seconds", 90.0, 15.0, 1200.0),
@@ -671,6 +782,55 @@ def parse_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def is_strict_timestamp_warning(line: str) -> bool:
+    """判断一行 FFmpeg stderr 是否只是 null 输出端的 DTS 时间戳警告。"""
+    lowered = line.casefold()
+    return any(pattern in lowered for pattern in STRICT_TIMESTAMP_WARNING_PATTERNS)
+
+
+def split_strict_decode_messages(lines: Iterable[str]) -> tuple[list[str], list[str]]:
+    """把严格解码日志拆分为“严重错误”和“时间戳警告”。
+
+    ``Application provided invalid, non monotonically increasing dts`` 来自验证命令的
+    null 输出器。它说明时间戳不够规整，但不能单独证明视频帧无法正确解码。
+
+    如果同一轮日志中还存在其他错误，则其他错误仍按严重问题处理；只有纯 DTS
+    警告及其后果性 muxer 信息才会降级。
+    """
+    cleaned = [str(line).strip() for line in lines if str(line).strip()]
+    timestamp_lines = [line for line in cleaned if is_strict_timestamp_warning(line)]
+    other_lines = [line for line in cleaned if not is_strict_timestamp_warning(line)]
+
+    if timestamp_lines:
+        filtered_other: list[str] = []
+        for line in other_lines:
+            lowered = line.casefold()
+            if any(pattern in lowered for pattern in STRICT_TIMESTAMP_DERIVATIVE_PATTERNS):
+                continue
+            filtered_other.append(line)
+        other_lines = filtered_other
+
+    return other_lines, timestamp_lines
+
+
+def format_timestamp_warning(
+    timestamp_count: int,
+    timestamp_samples: list[str],
+    last_seconds: float,
+) -> str:
+    """把大量重复 DTS 日志压缩成一条可读警告，避免报告文件被刷满。"""
+    samples = timestamp_samples[:STRICT_TIMESTAMP_SAMPLE_LIMIT]
+    sample_text = "\n".join(f"    {line}" for line in samples)
+    omitted = max(timestamp_count - len(samples), 0)
+    suffix = f"\n    ……另有 {omitted} 条同类信息" if omitted > 0 else ""
+    return (
+        f"时间戳警告（约 {format_duration(last_seconds)}）：发现 {timestamp_count} 条重复或"
+        "非严格递增 DTS。该信息来自严格验证的 null 输出端，未单独证明 AV1 码流损坏；"
+        "已继续检查到文件末尾。\n"
+        f"{sample_text}{suffix}"
+    )
 
 
 def parse_rate_fraction(value: Any) -> Optional[Fraction]:
@@ -954,7 +1114,13 @@ class AV1CompressorApp:
         self.stop_event = threading.Event()
         self.worker: Optional[threading.Thread] = None
         self.current_process: Optional[subprocess.Popen[str]] = None
+        # 当前 FFmpeg 或 ffprobe 对应的 Windows Job Object 句柄必须保持到进程退出，
+        # 否则 CPU 硬上限可能提前失效。非 Windows 或未启用硬上限时为 None。
+        self.current_job_handle: Optional[int] = None
         self.process_lock = threading.Lock()
+        self.resource_limit_warning_keys: set[str] = set()
+        # 成功读回资源限制后也只在每种工具/配置首次记录一次，避免批量 ffprobe 时刷屏。
+        self.resource_limit_success_keys: set[str] = set()
         self.sources: list[InputSource] = []
         self.tasks: list[Task] = []
         self.tree_items: dict[str, str] = {}
@@ -979,6 +1145,12 @@ class AV1CompressorApp:
         self.last_encoding_progress_at = 0.0
         self.custom_temp_root: Optional[Path] = None
         self.options_window: Optional[tk.Toplevel] = None
+        self.extra_features_window: Optional[tk.Toplevel] = None
+        self.extra_validation_worker: Optional[threading.Thread] = None
+        self.extra_validation_stop_event = threading.Event()
+        self.extra_validation_process: Optional[subprocess.Popen[str]] = None
+        self.extra_validation_job_handle: Optional[int] = None
+        self.extra_validation_process_lock = threading.Lock()
         self.current_state_context: Optional[tuple[list[InputSource], Path, str, bool, bool, bool, bool, str, bool]] = None
         self.existing_output_files: list[Path] = []
         self.existing_output_name_index: dict[str, list[Path]] = {}
@@ -1041,6 +1213,12 @@ class AV1CompressorApp:
             "failure_probe_pre_seconds": self.settings.get("failure_probe_pre_seconds", 30.0),
             "failure_probe_post_seconds": self.settings.get("failure_probe_post_seconds", 90.0),
             "failure_probe_max_points": self.settings.get("failure_probe_max_points", 3),
+            "process_priority": PROCESS_PRIORITY_FROM_LABEL.get(
+                self.process_priority_var.get(),
+                self.settings.get("process_priority", "below_normal"),
+            ) if hasattr(self, "process_priority_var") else self.settings.get("process_priority", "below_normal"),
+            "cpu_limit_enabled": self.cpu_limit_var.get() if hasattr(self, "cpu_limit_var") else self.settings.get("cpu_limit_enabled", True),
+            "cpu_limit_percent": self.cpu_limit_percent_var.get() if hasattr(self, "cpu_limit_percent_var") else self.settings.get("cpu_limit_percent", 70),
         })
 
     def _persist_settings(self) -> None:
@@ -1117,6 +1295,14 @@ class AV1CompressorApp:
         self.failure_point_var = tk.BooleanVar(value=bool(self.settings.get("failure_point_probe_enabled", True)))
         self.compatibility_var = tk.BooleanVar(value=bool(self.settings.get("compatibility_fallback_enabled", False)))
         self.two_stage_var = tk.BooleanVar(value=bool(self.settings.get("two_stage_queue_enabled", True)))
+        self.process_priority_var = tk.StringVar(
+            value=PROCESS_PRIORITY_LABELS.get(
+                str(self.settings.get("process_priority", "below_normal")),
+                "低于正常",
+            )
+        )
+        self.cpu_limit_var = tk.BooleanVar(value=bool(self.settings.get("cpu_limit_enabled", True)))
+        self.cpu_limit_percent_var = tk.StringVar(value=str(int(self.settings.get("cpu_limit_percent", 70))))
         option_buttons = ttk.Frame(output_frame)
         option_buttons.grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 0))
         self.optional_button = ttk.Button(
@@ -1125,6 +1311,12 @@ class AV1CompressorApp:
             command=self._open_optional_features,
         )
         self.optional_button.pack(side=tk.LEFT)
+        self.extra_features_button = ttk.Button(
+            option_buttons,
+            text="额外功能",
+            command=self._open_extra_features,
+        )
+        self.extra_features_button.pack(side=tk.LEFT, padx=(6, 0))
 
         task_frame = ttk.LabelFrame(main, text="任务", padding=6)
         task_frame.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
@@ -1194,10 +1386,11 @@ class AV1CompressorApp:
         self.log_text.grid(row=0, column=0, sticky="nsew")
 
     def _open_optional_features(self) -> None:
-        """打开“设置”窗口。
+        """打开双列“设置”窗口。
 
-        这里集中放所有长期软件配置：工具路径、输出规则、归类规则、预估、修复和临时目录。
-        这些设置会写入同名 JSON；任务恢复和历史记录仍然写入 state.json。
+        设置项增多后继续单列堆叠会让 768p 等低分辨率屏幕无法看到底部按钮。
+        当前窗口把设置按职责分到左右两列，并限制初始尺寸不超过当前屏幕可用区域。
+        所有长期配置仍写入同名 JSON；任务恢复和历史记录仍写入 state.json。
         """
         if self.options_window is not None and self.options_window.winfo_exists():
             self.options_window.deiconify()
@@ -1209,38 +1402,47 @@ class AV1CompressorApp:
         self.options_window = window
         window.title("设置")
         window.transient(self.root)
-        window.resizable(False, False)
+        window.resizable(True, True)
+        window.minsize(760, 500)
 
-        body = ttk.Frame(window, padding=14)
+        body = ttk.Frame(window, padding=12)
         body.pack(fill=tk.BOTH, expand=True)
-        body.columnconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1, uniform="settings_columns")
+        body.columnconfigure(1, weight=1, uniform="settings_columns")
+        body.rowconfigure(0, weight=1)
 
-        def add_group(title: str) -> ttk.LabelFrame:
-            group = ttk.LabelFrame(body, text=title, padding=8)
-            group.pack(fill=tk.X, pady=(0, 10))
+        left_column = ttk.Frame(body)
+        right_column = ttk.Frame(body)
+        left_column.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        right_column.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        left_column.columnconfigure(0, weight=1)
+        right_column.columnconfigure(0, weight=1)
+
+        def add_group(parent: ttk.Frame, title: str, row: int) -> ttk.LabelFrame:
+            group = ttk.LabelFrame(parent, text=title, padding=8)
+            group.grid(row=row, column=0, sticky="ew", pady=(0, 8))
             group.columnconfigure(1, weight=1)
             return group
 
-        # ---------- 工具路径 ----------
-        tools_group = add_group("工具路径")
+        # ---------- 左列：工具、输出、临时目录 ----------
+        tools_group = add_group(left_column, "工具路径", 0)
         ttk.Label(tools_group, text="FFmpeg：").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=(0, 6))
-        ttk.Entry(tools_group, textvariable=self.ffmpeg_path_var, width=62).grid(row=0, column=1, sticky="ew", pady=(0, 6))
+        ttk.Entry(tools_group, textvariable=self.ffmpeg_path_var, width=36).grid(row=0, column=1, sticky="ew", pady=(0, 6))
         ttk.Button(tools_group, text="选择", command=self._choose_ffmpeg_path).grid(row=0, column=2, padx=(6, 0), pady=(0, 6))
         ttk.Label(tools_group, text="ffprobe：").grid(row=1, column=0, sticky="w", padx=(0, 6))
-        ttk.Entry(tools_group, textvariable=self.ffprobe_path_var, width=62).grid(row=1, column=1, sticky="ew")
+        ttk.Entry(tools_group, textvariable=self.ffprobe_path_var, width=36).grid(row=1, column=1, sticky="ew")
         ttk.Button(tools_group, text="选择", command=self._choose_ffprobe_path).grid(row=1, column=2, padx=(6, 0))
         ttk.Label(
             tools_group,
-            text="路径会保存到同名 JSON 的 tools 分组；留空也能启动，但开始压制前必须设置。",
+            text="路径保存在同名 JSON；压制和严格验证前都会检查工具是否可用。",
             foreground="#666666",
-            wraplength=650,
+            wraplength=390,
             justify=tk.LEFT,
         ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
-        # ---------- 输出与扫描 ----------
-        output_group = add_group("输出与扫描")
+        output_group = add_group(left_column, "输出与扫描", 1)
         ttk.Label(output_group, text="文件名后缀：").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        suffix_entry = ttk.Entry(output_group, textvariable=self.suffix_var, width=28)
+        suffix_entry = ttk.Entry(output_group, textvariable=self.suffix_var, width=22)
         suffix_entry.grid(row=0, column=1, sticky="w")
         ttk.Checkbutton(
             output_group,
@@ -1248,89 +1450,148 @@ class AV1CompressorApp:
             variable=self.recursive_var,
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
-        # ---------- 结果归类 ----------
-        classify_group = add_group("结果归类")
-        move_success_text: str = f"成功且体积变小后，将原视频移入输入根目录的“{PENDING_DELETE_DIRNAME}”"
-        move_no_gain_text: str = f"无压缩收益后，将源视频移入输入根目录的“{NO_GAIN_DIRNAME}”"
-        move_failed_text: str = f"最终失败后，将源视频移入输入根目录的“{FAILED_DIRNAME}”"
-        ttk.Checkbutton(classify_group, text=move_success_text, variable=self.move_original_var).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(classify_group, text=move_no_gain_text, variable=self.move_no_gain_var).grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Checkbutton(classify_group, text=move_failed_text, variable=self.move_failed_var).grid(row=2, column=0, sticky="w", pady=(6, 0))
-        ttk.Label(
-            classify_group,
-            text="以上只移动源文件，不直接删除源文件。转码成品、无收益产物和临时文件仍按验证结果处理。",
-            foreground="#666666",
-            wraplength=650,
-            justify=tk.LEFT,
-        ).grid(row=3, column=0, sticky="w", pady=(6, 0))
-
-        # ---------- 压制前判断 ----------
-        precheck_group = add_group("压制前判断")
-        ttk.Checkbutton(
-            precheck_group,
-            text="压制前进行收益预估；预计节省不足阈值时归入“_无压缩收益”",
-            variable=self.precheck_var,
-        ).grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(precheck_group, text="预计节省不足：").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.precheck_threshold_var = tk.StringVar(value=str(self.settings.get("precheck_min_saving_percent", 8.0)))
-        ttk.Entry(precheck_group, textvariable=self.precheck_threshold_var, width=8).grid(row=1, column=1, sticky="w", pady=(8, 0))
-        ttk.Label(precheck_group, text="% 时跳过完整压制").grid(row=1, column=2, sticky="w", pady=(8, 0))
-        ttk.Label(
-            precheck_group,
-            text="会抽取多个位置的原始片段和 AV1 片段对比；可以节省无收益视频的完整压制时间，但可能略增前置耗时。",
-            foreground="#666666",
-            wraplength=650,
-            justify=tk.LEFT,
-        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
-
-        # ---------- 错误处理与修复 ----------
-        repair_group = add_group("错误处理与修复")
-        ttk.Checkbutton(
-            repair_group,
-            text="优先完成正常视频，失败文件最后集中修复（默认启用）",
-            variable=self.two_stage_var,
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(
-            repair_group,
-            text="失败后定位问题片段并局部测试回退方案（默认启用）",
-            variable=self.failure_point_var,
-        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Checkbutton(
-            repair_group,
-            text="兼容性回退：局部测试时允许 lp=4、CRF-1、Preset6（默认关闭）",
-            variable=self.compatibility_var,
-        ).grid(row=2, column=0, sticky="w", pady=(6, 0))
-        ttk.Label(
-            repair_group,
-            text="标准压制失败后，先记录失败时间点；修复阶段只在失败点附近测试方案，确认能通过后才整片重跑。",
-            foreground="#666666",
-            wraplength=650,
-            justify=tk.LEFT,
-        ).grid(row=3, column=0, sticky="w", pady=(6, 0))
-
-        # ---------- 临时文件 ----------
-        temp_group = add_group("临时文件")
-        ttk.Entry(temp_group, textvariable=self.temp_dir_var, width=62).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(temp_group, text="选择", command=self._choose_temp_dir).grid(row=0, column=1)
+        temp_group = add_group(left_column, "临时文件", 2)
+        ttk.Entry(temp_group, textvariable=self.temp_dir_var, width=36).grid(row=0, column=0, columnspan=2, sticky="ew", padx=(0, 6))
+        ttk.Button(temp_group, text="选择", command=self._choose_temp_dir).grid(row=0, column=2)
         ttk.Label(
             temp_group,
-            text=f"留空=使用输入根目录下的 {TEMP_WORK_DIRNAME}；自动重封装、收益预估和局部测试文件会在完成后清理。",
+            text=f"留空=输入根目录下的 {TEMP_WORK_DIRNAME}；重封装、收益预估和局部测试完成后自动清理。",
             foreground="#666666",
-            wraplength=650,
+            wraplength=390,
             justify=tk.LEFT,
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+        # ---------- 右列：归类、预估、修复、资源 ----------
+        classify_group = add_group(right_column, "结果归类", 0)
+        move_success_text: str = f"成功且体积变小后，将原视频移入“{PENDING_DELETE_DIRNAME}”"
+        move_no_gain_text: str = f"无压缩收益后，将源视频移入“{NO_GAIN_DIRNAME}”"
+        move_failed_text: str = f"最终失败后，将源视频移入“{FAILED_DIRNAME}”"
+        ttk.Checkbutton(classify_group, text=move_success_text, variable=self.move_original_var).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(classify_group, text=move_no_gain_text, variable=self.move_no_gain_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        ttk.Checkbutton(classify_group, text=move_failed_text, variable=self.move_failed_var).grid(row=2, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        ttk.Label(
+            classify_group,
+            text="以上只移动源文件，不直接删除源文件。",
+            foreground="#666666",
+            wraplength=390,
+            justify=tk.LEFT,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(5, 0))
+
+        precheck_group = add_group(right_column, "压制前判断", 1)
+        # add_group 默认让第 1 列扩展，适合路径输入框；这里的数值输入框应保持
+        # 固定宽度，单位文字紧随其后，额外空白交给第 3 列吸收。
+        precheck_group.columnconfigure(1, weight=0)
+        precheck_group.columnconfigure(2, weight=0)
+        precheck_group.columnconfigure(3, weight=1)
+        ttk.Checkbutton(
+            precheck_group,
+            text="压制前进行收益预估",
+            variable=self.precheck_var,
+        ).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(precheck_group, text="预计节省不足：").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.precheck_threshold_var = tk.StringVar(value=str(self.settings.get("precheck_min_saving_percent", 8.0)))
+        precheck_value_row = ttk.Frame(precheck_group)
+        precheck_value_row.grid(row=1, column=1, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Entry(precheck_value_row, textvariable=self.precheck_threshold_var, width=7).pack(side=tk.LEFT)
+        ttk.Label(precheck_value_row, text="% 时归为无收益").pack(side=tk.LEFT, padx=(4, 0))
+
+        repair_group = add_group(right_column, "错误处理与修复", 2)
+        ttk.Checkbutton(
+            repair_group,
+            text="优先完成正常视频，失败文件最后集中修复",
+            variable=self.two_stage_var,
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(
+            repair_group,
+            text="失败后定位问题片段并局部测试回退方案",
+            variable=self.failure_point_var,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        ttk.Checkbutton(
+            repair_group,
+            text="兼容性回退：允许 lp=4、CRF-1、Preset6",
+            variable=self.compatibility_var,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        ttk.Label(
+            repair_group,
+            text="修复阶段先局部确认方案，能通过错误点后才整片重跑。",
+            foreground="#666666",
+            wraplength=390,
+            justify=tk.LEFT,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(5, 0))
+
+        resource_group = add_group(right_column, "资源占用", 3)
+        resource_group.columnconfigure(1, weight=0)
+        resource_group.columnconfigure(2, weight=0)
+        resource_group.columnconfigure(3, weight=1)
+        ttk.Label(resource_group, text="FFmpeg / ffprobe 优先级：").grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
+        priority_combo = ttk.Combobox(
+            resource_group,
+            textvariable=self.process_priority_var,
+            values=("空闲", "低于正常", "正常"),
+            state="readonly",
+            width=12,
+        )
+        priority_combo.grid(row=0, column=1, sticky="w")
+        ttk.Checkbutton(
+            resource_group,
+            text="FFmpeg / ffprobe 最大 CPU 使用率",
+            variable=self.cpu_limit_var,
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+
+        # 输入阶段只允许空字符串或最多三位数字；保存时还会严格检查 10～100。
+        cpu_validate = (window.register(lambda value: value == "" or (value.isdigit() and len(value) <= 3)), "%P")
+        cpu_value_row = ttk.Frame(resource_group)
+        cpu_value_row.grid(row=1, column=1, columnspan=2, sticky="w", pady=(6, 0))
+        cpu_spinbox = ttk.Spinbox(
+            cpu_value_row,
+            from_=10,
+            to=100,
+            increment=1,
+            textvariable=self.cpu_limit_percent_var,
+            width=6,
+            validate="key",
+            validatecommand=cpu_validate,
+        )
+        cpu_spinbox.pack(side=tk.LEFT)
+        ttk.Label(cpu_value_row, text="%（整数）").pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(
+            resource_group,
+            text=(
+                "应用于本程序启动的全部 FFmpeg 和 ffprobe 进程；仅限制 Windows "
+                "CPU 调度资源，不修改压制参数或验证标准。"
+            ),
+            foreground="#666666",
+            wraplength=390,
+            justify=tk.LEFT,
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(5, 0))
 
         button_row = ttk.Frame(body)
-        button_row.pack(fill=tk.X, pady=(4, 0))
+        button_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
 
         def close_window() -> None:
-            # 阈值文本框不是 BooleanVar，关闭窗口时同步回 settings 后再统一保存。
+            # 收益阈值继续允许小数；CPU 上限则只接受 10～100 的整数。
             try:
                 threshold = float(self.precheck_threshold_var.get().strip())
+                if not math.isfinite(threshold):
+                    raise ValueError
             except (TypeError, ValueError):
-                threshold = float(self.settings.get("precheck_min_saving_percent", 8.0))
-                self.precheck_threshold_var.set(str(threshold))
+                messagebox.showerror("设置无效", "收益预估阈值必须是有效数字。", parent=window)
+                return
+
+            cpu_text = self.cpu_limit_percent_var.get().strip()
+            if not cpu_text.isdigit():
+                messagebox.showerror("设置无效", "CPU 最大使用率必须是 10～100 的整数。", parent=window)
+                return
+            cpu_percent = int(cpu_text)
+            if not 10 <= cpu_percent <= 100:
+                messagebox.showerror("设置无效", "CPU 最大使用率必须位于 10～100。", parent=window)
+                return
+
             self.settings["precheck_min_saving_percent"] = threshold
+            self.settings["cpu_limit_percent"] = cpu_percent
+            self.cpu_limit_percent_var.set(str(cpu_percent))
             self._persist_settings()
             try:
                 window.grab_release()
@@ -1342,13 +1603,926 @@ class AV1CompressorApp:
         ttk.Button(button_row, text="保存并关闭", command=close_window).pack(side=tk.RIGHT)
         window.protocol("WM_DELETE_WINDOW", close_window)
         window.update_idletasks()
-        width = max(720, window.winfo_reqwidth())
-        height = max(760, window.winfo_reqheight())
-        x = self.root.winfo_rootx() + max((self.root.winfo_width() - width) // 2, 0)
-        y = self.root.winfo_rooty() + max((self.root.winfo_height() - height) // 4, 0)
+
+        screen_width = max(window.winfo_screenwidth(), 800)
+        screen_height = max(window.winfo_screenheight(), 600)
+        requested_width = max(900, window.winfo_reqwidth())
+        requested_height = max(540, window.winfo_reqheight())
+        width = min(requested_width, max(screen_width - 40, 760))
+        height = min(requested_height, max(screen_height - 80, 500))
+        x = max((screen_width - width) // 2, 0)
+        y = max((screen_height - height) // 3, 0)
         window.geometry(f"{width}x{height}+{x}+{y}")
         window.grab_set()
         suffix_entry.focus_set()
+
+    def _open_extra_features(self) -> None:
+        """打开额外功能托管窗口。
+
+        这里仅放不适合进入主压制流程、但对无人值守归档具有明确价值的独立工具。
+        首批功能分开呈现，避免用户把“检查任意源视频”和“检查本工具 AV1 成品”混为一谈。
+        """
+        if self.extra_features_window is not None and self.extra_features_window.winfo_exists():
+            self.extra_features_window.deiconify()
+            self.extra_features_window.lift()
+            self.extra_features_window.focus_force()
+            return
+
+        window = tk.Toplevel(self.root)
+        self.extra_features_window = window
+        window.title("额外功能")
+        window.transient(self.root)
+        window.resizable(True, True)
+        window.minsize(700, 500)
+
+        body = ttk.Frame(window, padding=12)
+        body.pack(fill=tk.BOTH, expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(3, weight=1)
+
+        source_group = ttk.LabelFrame(body, text="严格验证源视频", padding=10)
+        source_group.grid(row=0, column=0, sticky="ew")
+        source_group.columnconfigure(0, weight=1)
+        ttk.Label(
+            source_group,
+            text=(
+                "对单个文件或递归文件夹执行严格检查。先由 ffprobe 完整遍历容器和数据包，"
+                "再由 FFmpeg 完整解码动态视频流和音频流；真实解码错误与时间戳警告会分开报告。"
+            ),
+            wraplength=600,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, sticky="w")
+        source_buttons = ttk.Frame(source_group)
+        source_buttons.grid(row=0, column=1, sticky="e", padx=(10, 0))
+        self.extra_source_file_button = ttk.Button(
+            source_buttons,
+            text="选择单个文件",
+            command=lambda: self._start_extra_validation("source", "file"),
+        )
+        self.extra_source_file_button.pack(side=tk.LEFT)
+        self.extra_source_folder_button = ttk.Button(
+            source_buttons,
+            text="选择文件夹",
+            command=lambda: self._start_extra_validation("source", "folder"),
+        )
+        self.extra_source_folder_button.pack(side=tk.LEFT, padx=(6, 0))
+
+        av1_group = ttk.LabelFrame(body, text="严格验证 AV1 转码成品", padding=10)
+        av1_group.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        av1_group.columnconfigure(0, weight=1)
+        ttk.Label(
+            av1_group,
+            text=(
+                "对单个文件或递归文件夹中的 MKV 成品执行检查：要求 Matroska、唯一 AV1 10-bit 主视频、"
+                "全部音轨为 Opus、存在本工具来源标记，并严格完整解码视频和音频。"
+            ),
+            wraplength=600,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, sticky="w")
+        av1_buttons = ttk.Frame(av1_group)
+        av1_buttons.grid(row=0, column=1, sticky="e", padx=(10, 0))
+        self.extra_av1_file_button = ttk.Button(
+            av1_buttons,
+            text="选择单个文件",
+            command=lambda: self._start_extra_validation("av1", "file"),
+        )
+        self.extra_av1_file_button.pack(side=tk.LEFT)
+        self.extra_av1_folder_button = ttk.Button(
+            av1_buttons,
+            text="选择文件夹",
+            command=lambda: self._start_extra_validation("av1", "folder"),
+        )
+        self.extra_av1_folder_button.pack(side=tk.LEFT, padx=(6, 0))
+
+        status_group = ttk.LabelFrame(body, text="验证进度", padding=8)
+        status_group.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        status_group.columnconfigure(0, weight=1)
+        self.extra_validation_status_var = tk.StringVar(value="等待选择验证功能")
+        self.extra_validation_current_var = tk.StringVar(value="")
+        ttk.Label(status_group, textvariable=self.extra_validation_status_var, justify=tk.LEFT).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            status_group,
+            textvariable=self.extra_validation_current_var,
+            justify=tk.LEFT,
+            wraplength=650,
+        ).grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        self.extra_validation_progress = ttk.Progressbar(status_group, maximum=100)
+        self.extra_validation_progress.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        self.extra_validation_stop_button = ttk.Button(
+            status_group,
+            text="停止验证",
+            command=self._stop_extra_validation,
+            state=tk.DISABLED,
+        )
+        self.extra_validation_stop_button.grid(row=0, column=1, rowspan=3, sticky="e", padx=(8, 0))
+
+        log_group = ttk.LabelFrame(body, text="本次验证日志", padding=6)
+        log_group.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
+        log_group.columnconfigure(0, weight=1)
+        log_group.rowconfigure(0, weight=1)
+        self.extra_validation_log = ScrolledText(log_group, height=12, wrap=tk.WORD, state=tk.DISABLED)
+        self.extra_validation_log.grid(row=0, column=0, sticky="nsew")
+
+        ttk.Label(
+            body,
+            text=(
+                "发现严重问题时生成问题清单；仅发现重复/非严格递增 DTS 时生成警告报告；"
+                "完全通过时不创建文件。"
+            ),
+            foreground="#666666",
+        ).grid(row=4, column=0, sticky="w", pady=(6, 0))
+
+        def close_window() -> None:
+            if self._extra_validation_is_running():
+                messagebox.showwarning("验证进行中", "请先停止或等待当前严格验证完成。", parent=window)
+                return
+            self.extra_features_window = None
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", close_window)
+        window.update_idletasks()
+        width = min(max(820, window.winfo_reqwidth()), max(window.winfo_screenwidth() - 40, 700))
+        height = min(max(560, window.winfo_reqheight()), max(window.winfo_screenheight() - 80, 500))
+        x = self.root.winfo_rootx() + max((self.root.winfo_width() - width) // 2, 0)
+        y = self.root.winfo_rooty() + max((self.root.winfo_height() - height) // 4, 0)
+        window.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _extra_validation_is_running(self) -> bool:
+        worker = self.extra_validation_worker
+        return worker is not None and worker.is_alive()
+
+    def _set_extra_validation_running(self, running: bool) -> None:
+        """同步主窗口和额外功能窗口的按钮状态，防止转码与严格验证抢占同一 FFmpeg 状态。"""
+        if hasattr(self, "extra_source_file_button"):
+            state = tk.DISABLED if running else tk.NORMAL
+            for button in (
+                self.extra_source_file_button,
+                self.extra_source_folder_button,
+                self.extra_av1_file_button,
+                self.extra_av1_folder_button,
+            ):
+                button.configure(state=state)
+            self.extra_validation_stop_button.configure(state=tk.NORMAL if running else tk.DISABLED)
+        if running:
+            self.start_button.configure(state=tk.DISABLED)
+            self.optional_button.configure(state=tk.DISABLED)
+            self.extra_features_button.configure(state=tk.DISABLED)
+        elif not self.running:
+            self.start_button.configure(state=tk.NORMAL)
+            self.optional_button.configure(state=tk.NORMAL)
+            self.extra_features_button.configure(state=tk.NORMAL)
+
+    def _append_extra_validation_log(self, text: str) -> None:
+        if not hasattr(self, "extra_validation_log"):
+            return
+        try:
+            self.extra_validation_log.configure(state=tk.NORMAL)
+            self.extra_validation_log.insert(tk.END, f"[{datetime.now():%H:%M:%S}] {text}\n")
+            self.extra_validation_log.see(tk.END)
+            self.extra_validation_log.configure(state=tk.DISABLED)
+        except tk.TclError:
+            pass
+
+    def _start_extra_validation(self, mode: str, target_kind: str) -> None:
+        """启动单文件或文件夹严格验证。
+
+        两种入口共用完全相同的结构检查、完整解码和报告生成代码，区别仅在于
+        候选集合与报告命名，避免单文件验证和批量验证逐渐出现不同判定标准。
+        """
+        if self.running:
+            messagebox.showwarning("主任务正在运行", "请先结束当前压制任务，再执行严格验证。", parent=self.extra_features_window)
+            return
+        if self._extra_validation_is_running():
+            messagebox.showwarning("验证正在运行", "当前已有严格验证任务。", parent=self.extra_features_window)
+            return
+        if target_kind not in {"file", "folder"}:
+            raise ValueError(f"未知严格验证目标类型：{target_kind}")
+
+        # 用户可能刚在设置窗口修改工具路径；先持久化并重新解析，再启动独立验证。
+        self._persist_settings()
+        if not self.ffmpeg or not self.ffprobe:
+            messagebox.showerror("缺少工具路径", "请先在“设置”中选择 FFmpeg 和 ffprobe。", parent=self.extra_features_window)
+            return
+        for executable, label in ((self.ffmpeg, "FFmpeg"), (self.ffprobe, "ffprobe")):
+            path = Path(executable)
+            if not path.is_file():
+                messagebox.showerror("工具路径无效", f"{label} 不存在：\n{path}", parent=self.extra_features_window)
+                return
+
+        if target_kind == "file":
+            if mode == "source":
+                filetypes = [
+                    ("视频文件", " ".join(f"*{ext}" for ext in sorted(VIDEO_EXTENSIONS))),
+                    ("所有文件", "*.*"),
+                ]
+                title = "选择需要严格验证的源视频"
+            else:
+                filetypes = [("Matroska 视频", "*.mkv"), ("所有文件", "*.*")]
+                title = "选择需要严格验证的 AV1 成品"
+            selected = filedialog.askopenfilename(
+                title=title,
+                filetypes=filetypes,
+                parent=self.extra_features_window,
+            )
+            if not selected:
+                return
+            selected_target = Path(selected).resolve()
+            try:
+                if not selected_target.is_file():
+                    raise OSError("所选路径不是普通文件")
+            except OSError as exc:
+                messagebox.showerror("文件无效", f"无法读取所选文件：\n{selected_target}\n\n{exc}", parent=self.extra_features_window)
+                return
+            root = selected_target.parent
+            candidates = [selected_target]
+        else:
+            title = "选择需要严格验证的源视频文件夹" if mode == "source" else "选择需要严格验证的 AV1 成品文件夹"
+            selected = filedialog.askdirectory(title=title, parent=self.extra_features_window)
+            if not selected:
+                return
+            selected_target = Path(selected).resolve()
+            root = selected_target
+            candidates = self._collect_strict_validation_candidates(root, mode)
+            if not candidates:
+                label = "受支持视频" if mode == "source" else "MKV 成品"
+                messagebox.showinfo("没有文件", f"所选文件夹内没有找到{label}。", parent=self.extra_features_window)
+                return
+
+        self.extra_validation_stop_event.clear()
+        self.extra_validation_progress["value"] = 0
+        self.extra_validation_status_var.set(f"准备验证 {len(candidates)} 个文件")
+        self.extra_validation_current_var.set(str(selected_target))
+        self.extra_validation_log.configure(state=tk.NORMAL)
+        self.extra_validation_log.delete("1.0", tk.END)
+        self.extra_validation_log.configure(state=tk.DISABLED)
+        self._set_extra_validation_running(True)
+        scope_label = "单个文件" if target_kind == "file" else "文件夹"
+        self._append_extra_validation_log(
+            f"开始{'源视频' if mode == 'source' else 'AV1 成品'}严格验证（{scope_label}）："
+            f"{selected_target}；共 {len(candidates)} 个文件。"
+        )
+
+        self.extra_validation_worker = threading.Thread(
+            target=self._strict_validation_worker,
+            args=(root, mode, candidates, target_kind, selected_target),
+            daemon=True,
+        )
+        self.extra_validation_worker.start()
+
+    def _stop_extra_validation(self) -> None:
+        if not self._extra_validation_is_running():
+            return
+        self.extra_validation_stop_event.set()
+        self._append_extra_validation_log("收到停止请求，正在终止当前验证进程……")
+        threading.Thread(target=self._terminate_extra_validation_process, daemon=True).start()
+
+    def _collect_strict_validation_candidates(self, root: Path, mode: str) -> list[Path]:
+        results: list[Path] = []
+        excluded_dirs = {TEMP_WORK_DIRNAME.casefold()}
+        for current_root, dirnames, filenames in os.walk(root):
+            dirnames[:] = [name for name in dirnames if name.casefold() not in excluded_dirs]
+            base = Path(current_root)
+            for filename in filenames:
+                path = base / filename
+                lower = filename.casefold()
+                if any(token in lower for token in (".__processing__.", ".__remux_retry__.", ".invalid_")):
+                    continue
+                if mode == "source":
+                    if path.suffix.lower() not in VIDEO_EXTENSIONS:
+                        continue
+                else:
+                    if path.suffix.lower() != ".mkv":
+                        continue
+                try:
+                    if path.is_file():
+                        results.append(path.resolve())
+                except OSError:
+                    continue
+        return sorted(results, key=lambda item: os.path.normcase(str(item)))
+
+    def _strict_validation_worker(
+        self,
+        root: Path,
+        mode: str,
+        candidates: list[Path],
+        target_kind: str,
+        selected_target: Path,
+    ) -> None:
+        findings: list[dict[str, str]] = []
+        issue_file_count = 0
+        warning_file_count = 0
+        stopped = False
+        checked_count = 0
+        try:
+            # 严格验证需要 ffprobe 和 FFmpeg 两个工具都可运行；这里独立检查，避免主压制环境检查的输出目录要求。
+            for executable, label in ((self.ffprobe, "ffprobe"), (self.ffmpeg, "FFmpeg")):
+                return_code, stdout_text, stderr_text, timed_out = self._run_extra_capture(
+                    [executable, "-version"],
+                    timeout_seconds=30,
+                )
+                if timed_out:
+                    raise RuntimeError(f"{label} 启动检查超时。")
+                if return_code != 0:
+                    detail = (stdout_text + "\n" + stderr_text).strip()
+                    raise RuntimeError(f"{label} 无法运行：{detail}")
+
+            total = len(candidates)
+            for index, path in enumerate(candidates, start=1):
+                if self.extra_validation_stop_event.is_set():
+                    stopped = True
+                    break
+                self.ui_queue.put(("extra_validation_progress", (index - 1, total, path)))
+                try:
+                    file_issues, file_warnings = self._strict_validate_single_file(path, mode)
+                except InterruptedError:
+                    stopped = True
+                    break
+                checked_count = index
+                if file_issues or file_warnings:
+                    if file_issues:
+                        issue_file_count += 1
+                    if file_warnings:
+                        warning_file_count += 1
+                    findings.append({
+                        "path": str(path),
+                        "relative": self._safe_relative_text(path, root),
+                        "issues": "\n".join(file_issues),
+                        "warnings": "\n".join(file_warnings),
+                    })
+                    if file_issues:
+                        self.ui_queue.put(("extra_validation_log", f"发现严重问题：{self._safe_relative_text(path, root)}"))
+                        for detail in file_issues:
+                            self.ui_queue.put(("extra_validation_log", f"  - {detail}"))
+                    if file_warnings:
+                        self.ui_queue.put(("extra_validation_log", f"发现警告：{self._safe_relative_text(path, root)}"))
+                        for detail in file_warnings:
+                            self.ui_queue.put(("extra_validation_log", f"  - {detail}"))
+                else:
+                    self.ui_queue.put(("extra_validation_log", f"通过：{self._safe_relative_text(path, root)}"))
+                self.ui_queue.put(("extra_validation_progress", (index, total, path)))
+
+            report_path: Optional[Path] = None
+            if findings:
+                report_path = self._write_strict_validation_report(
+                    root,
+                    mode,
+                    candidates,
+                    findings,
+                    stopped,
+                    target_kind,
+                    selected_target,
+                    issue_file_count,
+                    warning_file_count,
+                )
+            self.ui_queue.put(("extra_validation_done", {
+                "mode": mode,
+                "total": len(candidates),
+                "checked": checked_count,
+                "issues": issue_file_count,
+                "warnings": warning_file_count,
+                "stopped": stopped,
+                "report": str(report_path) if report_path else "",
+            }))
+        except InterruptedError:
+            report_path: Optional[Path] = None
+            if findings:
+                report_path = self._write_strict_validation_report(
+                    root,
+                    mode,
+                    candidates,
+                    findings,
+                    True,
+                    target_kind,
+                    selected_target,
+                    issue_file_count,
+                    warning_file_count,
+                )
+            self.ui_queue.put(("extra_validation_done", {
+                "mode": mode,
+                "total": len(candidates),
+                "checked": checked_count,
+                "issues": issue_file_count,
+                "warnings": warning_file_count,
+                "stopped": True,
+                "report": str(report_path) if report_path else "",
+            }))
+        except Exception as exc:
+            self.logger.exception("额外功能严格验证异常")
+            self.ui_queue.put(("extra_validation_failed", str(exc)))
+
+    @staticmethod
+    def _safe_relative_text(path: Path, root: Path) -> str:
+        try:
+            return str(path.relative_to(root))
+        except ValueError:
+            return str(path)
+
+    def _strict_validate_single_file(self, path: Path, mode: str) -> tuple[list[str], list[str]]:
+        issues: list[str] = []
+        warnings: list[str] = []
+        probe, probe_issues = self._strict_ffprobe_file(path)
+        issues.extend(probe_issues)
+        if probe is None:
+            return issues, warnings
+
+        streams = probe.get("streams") or []
+        format_info = probe.get("format") or {}
+        dynamic_videos = [
+            stream for stream in streams
+            if stream.get("codec_type") == "video"
+            and parse_int((stream.get("disposition") or {}).get("attached_pic"), 0) == 0
+        ]
+        attached_pictures = [
+            stream for stream in streams
+            if stream.get("codec_type") == "video"
+            and parse_int((stream.get("disposition") or {}).get("attached_pic"), 0) == 1
+        ]
+        audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
+
+        duration = parse_float(format_info.get("duration"), 0.0)
+        if duration <= 0 and dynamic_videos:
+            duration = max((parse_float(stream.get("duration"), 0.0) for stream in dynamic_videos), default=0.0)
+        if duration <= 0:
+            issues.append("ffprobe 无法确定有效视频时长。")
+
+        if not dynamic_videos:
+            issues.append("没有动态主视频流（attached_pic 封面不计入主视频）。")
+        elif mode == "source" and len(dynamic_videos) > 1:
+            issues.append(f"包含 {len(dynamic_videos)} 个动态视频流；当前主压制流程会为避免选错画面而跳过。")
+
+        for stream in dynamic_videos:
+            index = parse_int(stream.get("index"), -1)
+            codec = str(stream.get("codec_name", "")).strip() or "未知"
+            width = parse_int(stream.get("width"), 0)
+            height = parse_int(stream.get("height"), 0)
+            packets = parse_int(stream.get("nb_read_packets"), -1)
+            if width <= 0 or height <= 0:
+                issues.append(f"视频流 #{index}（{codec}）分辨率无效：{width}×{height}。")
+            if packets == 0:
+                issues.append(f"视频流 #{index} 没有可读取的数据包。")
+
+        for stream in audio_streams:
+            index = parse_int(stream.get("index"), -1)
+            packets = parse_int(stream.get("nb_read_packets"), -1)
+            if packets == 0:
+                issues.append(f"音频流 #{index} 没有可读取的数据包。")
+
+        if mode == "av1":
+            format_name = str(format_info.get("format_name", "")).lower()
+            if "matroska" not in format_name:
+                issues.append(f"容器不是本工具预期的 Matroska：{format_name or '未知'}。")
+            if path.suffix.lower() != ".mkv":
+                issues.append("文件扩展名不是 .mkv。")
+            if len(dynamic_videos) != 1:
+                issues.append(f"AV1 成品应只有一个动态主视频流，实际为 {len(dynamic_videos)}。")
+            elif dynamic_videos:
+                video = dynamic_videos[0]
+                codec = str(video.get("codec_name", "")).lower()
+                if codec != "av1":
+                    issues.append(f"主视频编码不是 AV1：{codec or '未知'}。")
+                bit_depth = infer_bit_depth(video)
+                if bit_depth < 10:
+                    issues.append(f"主视频不是 10-bit：{video.get('pix_fmt', '未知')}。")
+            for stream in audio_streams:
+                codec = str(stream.get("codec_name", "")).lower()
+                if codec != "opus":
+                    issues.append(f"音频流 #{parse_int(stream.get('index'), -1)} 不是 Opus：{codec or '未知'}。")
+            if attached_pictures:
+                issues.append(f"成品中意外保留了 {len(attached_pictures)} 个 attached_pic 封面流。")
+
+            tags = {str(key).casefold(): str(value) for key, value in ((format_info.get("tags") or {}).items())}
+            required_tags = {
+                "av1tool_source_size": "源文件大小",
+                "av1tool_source_mtime_ns": "源文件修改时间",
+                "av1tool_source_relative": "源文件相对路径",
+                "av1tool_source_fingerprint": "源文件快速指纹",
+                "av1tool_fingerprint_version": "指纹版本",
+                "av1tool_policy_version": "编码策略版本",
+            }
+            missing_tags = [label for key, label in required_tags.items() if not tags.get(key, "").strip()]
+            if missing_tags:
+                issues.append("缺少本工具成品来源标记：" + "、".join(missing_tags) + "。")
+
+        # 即使结构检查已经发现问题，也继续尝试严格解码；这样一份清单能同时给出
+        # “格式不符合预期”和“码流是否真正损坏”两类结论，避免用户修完一项后再跑一遍。
+        if dynamic_videos:
+            decode_issues, decode_warnings = self._strict_decode_file(
+                path,
+                dynamic_videos,
+                audio_streams,
+                expected_duration=duration if duration > 0 else None,
+            )
+            issues.extend(decode_issues)
+            warnings.extend(decode_warnings)
+        return issues, warnings
+
+    def _strict_ffprobe_file(self, path: Path) -> tuple[Optional[dict[str, Any]], list[str]]:
+        """让 ffprobe 完整遍历容器数据包，并返回结构问题。
+
+        ``-count_packets`` 会让 ffprobe 读取到文件尾，而不是只解析文件头；输出仍只包含
+        每条流的计数和结构信息，不会像 ``-show_packets`` 那样生成巨大 JSON。
+        """
+        command = [
+            self.ffprobe,
+            "-hide_banner",
+            "-v", "error",
+            "-show_error",
+            "-count_packets",
+            "-show_format",
+            "-show_streams",
+            "-show_chapters",
+            "-print_format", "json",
+            str(path),
+        ]
+        try:
+            return_code, stdout_text, stderr_text, timed_out = self._run_extra_capture(
+                command,
+                timeout_seconds=STRICT_PROBE_TIMEOUT_SECONDS,
+            )
+        except InterruptedError:
+            raise
+        issues: list[str] = []
+        if timed_out:
+            return None, [f"ffprobe 超过 {int(STRICT_PROBE_TIMEOUT_SECONDS // 3600)} 小时仍未完成。"]
+        if return_code != 0:
+            detail = stderr_text.strip() or f"返回码 {return_code}"
+            return None, [f"ffprobe 无法完整读取文件：{detail[-1500:]}"]
+        if stderr_text.strip():
+            issues.append("ffprobe 报告错误信息：" + stderr_text.strip()[-1500:])
+        try:
+            probe = json.loads(stdout_text)
+        except json.JSONDecodeError as exc:
+            return None, [f"ffprobe JSON 无法解析：{exc}"]
+        error_info = probe.get("error")
+        if isinstance(error_info, dict) and error_info:
+            message = str(error_info.get("string", error_info))
+            issues.append(f"ffprobe error 节点：{message}")
+        if not probe.get("streams"):
+            issues.append("ffprobe 未发现任何媒体流。")
+        return probe, issues
+
+    def _run_extra_capture(
+        self,
+        command: list[str],
+        *,
+        timeout_seconds: float,
+    ) -> tuple[int, str, str, bool]:
+        """运行额外功能中的短输出命令，并支持停止和超时。
+
+        ffprobe 的 JSON 只在结束时输出，不能用主转码的逐行进度读取器；这里用
+        communicate 后台线程避免管道堵塞，同时主线程轮询停止事件和总超时。
+        """
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **subprocess_options(),
+        )
+        # 额外功能中的 ffprobe 可能通过 -count_packets 长时间遍历整个文件，因此也必须
+        # 使用与 FFmpeg 相同的 Windows 优先级和 CPU 硬上限。资源控制只影响调度速度，
+        # 不改变 ffprobe 的读取范围、结构判定或严格解码标准。
+        job_handle = self._safe_apply_windows_resource_limits(process)
+        with self.extra_validation_process_lock:
+            self.extra_validation_process = process
+            self.extra_validation_job_handle = job_handle
+
+        result_box: list[tuple[str, str]] = []
+        done = threading.Event()
+
+        def communicate() -> None:
+            try:
+                stdout_text, stderr_text = process.communicate()
+                result_box.append((stdout_text, stderr_text))
+            finally:
+                done.set()
+
+        reader = threading.Thread(target=communicate, daemon=True)
+        reader.start()
+        start_time = time.monotonic()
+        timed_out = False
+        try:
+            while not done.wait(0.25):
+                if self.extra_validation_stop_event.is_set():
+                    self._terminate_extra_validation_process()
+                    raise InterruptedError
+                if time.monotonic() - start_time > timeout_seconds:
+                    timed_out = True
+                    self._terminate_extra_validation_process()
+                    break
+            reader.join(timeout=5)
+            if result_box:
+                stdout_text, stderr_text = result_box[-1]
+            else:
+                stdout_text, stderr_text = "", ""
+            return process.poll() if process.poll() is not None else -1, stdout_text, stderr_text, timed_out
+        finally:
+            with self.extra_validation_process_lock:
+                if self.extra_validation_process is process:
+                    self.extra_validation_process = None
+                if self.extra_validation_job_handle == job_handle:
+                    self.extra_validation_job_handle = None
+            self._close_windows_job_handle(job_handle)
+
+    def _strict_decode_file(
+        self,
+        path: Path,
+        video_streams: list[dict[str, Any]],
+        audio_streams: list[dict[str, Any]],
+        *,
+        expected_duration: Optional[float],
+    ) -> tuple[list[str], list[str]]:
+        """完整解码动态视频和音频，并把严重错误与时间戳警告分开。
+
+        这里故意不再使用 ``-xerror``。原因是 null 输出器报告重复或非严格递增
+        DTS 时，``-xerror`` 会在第一个时间戳警告处提前中止，导致后半段视频根本
+        没有接受验证。严格程度改由以下组合保证：
+
+        - ``-err_detect explode``：让解码器对码流错误采取严格策略；
+        - ``-max_error_rate 0``：不允许可接受的解码错误比例；
+        - 完整收集 ``-v error`` 输出，并把任何非时间戳错误列为严重问题；
+        - 比较最终解码位置与容器时长，防止提前结束被误判为通过。
+
+        这样纯 DTS 警告可以继续验证到文件末尾，而真实解码损坏、截断、卡死、
+        非零退出和提前结束仍然不会被放行。
+        """
+        command = [
+            self.ffmpeg,
+            "-hide_banner",
+            "-nostdin",
+            "-v", "error",
+            "-err_detect", "explode",
+            "-max_error_rate", "0",
+            "-stats_period", "1",
+            "-progress", "pipe:1",
+            "-i", str(path),
+        ]
+        for stream in video_streams:
+            command += ["-map", f"0:{parse_int(stream.get('index'), 0)}"]
+        for stream in audio_streams:
+            command += ["-map", f"0:{parse_int(stream.get('index'), 0)}"]
+        command += ["-sn", "-dn", "-f", "null", "-"]
+
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            **subprocess_options(),
+        )
+        job_handle = self._safe_apply_windows_resource_limits(process)
+        with self.extra_validation_process_lock:
+            self.extra_validation_process = process
+            self.extra_validation_job_handle = job_handle
+
+        # 额外验证可能遇到同一时间戳警告成千上万次。这里边读边分类：
+        # - DTS 警告只累计数量并保留少量样例；
+        # - 其他 stderr 最多保留 4000 行；
+        # 从而既能给出准确计数，又不会让无人值守验证无限占用内存。
+        timestamp_warning_count = 0
+        timestamp_warning_samples: list[str] = []
+        other_stderr_lines: list[str] = []
+
+        def collect_strict_stderr() -> None:
+            nonlocal timestamp_warning_count
+            if process.stderr is None:
+                return
+            for raw_line in process.stderr:
+                clean = raw_line.rstrip()
+                if not clean:
+                    continue
+                if is_strict_timestamp_warning(clean):
+                    timestamp_warning_count += 1
+                    if len(timestamp_warning_samples) < STRICT_TIMESTAMP_SAMPLE_LIMIT:
+                        timestamp_warning_samples.append(clean)
+                    continue
+                other_stderr_lines.append(clean)
+                if len(other_stderr_lines) > 4000:
+                    del other_stderr_lines[:1000]
+
+        stderr_thread = threading.Thread(target=collect_strict_stderr, daemon=True)
+        stderr_thread.start()
+        stdout_queue: queue.Queue[str] = queue.Queue()
+        stdout_done = threading.Event()
+
+        def collect_progress() -> None:
+            try:
+                if process.stdout is None:
+                    return
+                for line in process.stdout:
+                    stdout_queue.put(line)
+            finally:
+                stdout_done.set()
+
+        stdout_thread = threading.Thread(target=collect_progress, daemon=True)
+        stdout_thread.start()
+        last_seconds = 0.0
+        last_progress_change = time.monotonic()
+        watchdog_triggered = False
+        try:
+            while True:
+                if self.extra_validation_stop_event.is_set():
+                    self._terminate_extra_validation_process()
+                    raise InterruptedError
+                try:
+                    line = stdout_queue.get(timeout=0.5).strip()
+                except queue.Empty:
+                    line = ""
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    current_seconds = last_seconds
+                    if key == "out_time":
+                        current_seconds = parse_ffmpeg_time(value)
+                    elif key == "out_time_ms":
+                        try:
+                            current_seconds = int(value) / 1_000_000.0
+                        except ValueError:
+                            current_seconds = last_seconds
+                    if current_seconds > last_seconds + 0.05:
+                        last_seconds = current_seconds
+                        last_progress_change = time.monotonic()
+
+                if process.poll() is None and time.monotonic() - last_progress_change > STRICT_VERIFY_STALL_TIMEOUT_SECONDS:
+                    watchdog_triggered = True
+                    self._terminate_extra_validation_process()
+                    break
+                if process.poll() is not None and stdout_done.is_set() and stdout_queue.empty():
+                    break
+
+            return_code = process.wait()
+            stdout_thread.join(timeout=2)
+            stderr_thread.join(timeout=2)
+
+            issues: list[str] = []
+            warnings: list[str] = []
+            if watchdog_triggered:
+                issues.append(
+                    f"严格完整解码在 {format_duration(last_seconds)} 处连续 "
+                    f"{int(STRICT_VERIFY_STALL_TIMEOUT_SECONDS)} 秒无进度。"
+                )
+                return issues, warnings
+
+            serious_lines = list(other_stderr_lines)
+            if timestamp_warning_count:
+                serious_lines = [
+                    line for line in serious_lines
+                    if not any(
+                        pattern in line.casefold()
+                        for pattern in STRICT_TIMESTAMP_DERIVATIVE_PATTERNS
+                    )
+                ]
+            if serious_lines:
+                detail = "\n".join(serious_lines).strip()[-3000:]
+                issues.append(f"严格完整解码报告严重错误（约 {format_duration(last_seconds)}）：{detail}")
+
+            # 时长检查放在时间戳警告分类之前。只有确实走到文件末尾，报告才可以明确写
+            # “已继续检查到文件末尾”；否则必须把提前结束保留为严重问题。
+            reached_end = True
+            if expected_duration and expected_duration > 0:
+                tolerance = max(5.0, expected_duration * 0.01)
+                reached_end = last_seconds + tolerance >= expected_duration
+                if not reached_end:
+                    issues.append(
+                        f"严格解码疑似提前结束：解码到 {format_duration(last_seconds)}，"
+                        f"容器时长为 {format_duration(expected_duration)}。"
+                    )
+
+            if timestamp_warning_count:
+                warning_text = format_timestamp_warning(
+                    timestamp_warning_count,
+                    timestamp_warning_samples,
+                    last_seconds,
+                )
+                if not reached_end:
+                    warning_text = warning_text.replace(
+                        "已继续检查到文件末尾。",
+                        "但本次验证没有到达文件末尾，需结合上方严重问题处理。",
+                    )
+                warnings.append(warning_text)
+
+            if return_code != 0:
+                # 某些 FFmpeg 构建会因为 null 输出端的 DTS 问题返回非零，即使媒体内容
+                # 已经完整解码。只有在“无其他错误 + 已到末尾 + 存在明确 DTS 警告”时
+                # 才降级；其他非零退出仍然是严重问题。
+                timestamp_only_exit = bool(timestamp_warning_count) and not serious_lines and reached_end
+                if timestamp_only_exit:
+                    warnings.append(
+                        f"FFmpeg 最终返回码为 {return_code}，但仅检测到上述时间戳警告，"
+                        "且媒体已完整检查到末尾；本项按警告处理。"
+                    )
+                else:
+                    issues.append(f"严格完整解码失败：FFmpeg 返回码 {return_code}。")
+
+            return issues, warnings
+        finally:
+            with self.extra_validation_process_lock:
+                if self.extra_validation_process is process:
+                    self.extra_validation_process = None
+                if self.extra_validation_job_handle == job_handle:
+                    self.extra_validation_job_handle = None
+            self._close_windows_job_handle(job_handle)
+
+    def _terminate_extra_validation_process(self) -> None:
+        with self.extra_validation_process_lock:
+            process = self.extra_validation_process
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        except OSError:
+            pass
+
+    def _write_strict_validation_report(
+        self,
+        root: Path,
+        mode: str,
+        candidates: list[Path],
+        findings: list[dict[str, str]],
+        stopped: bool,
+        target_kind: str,
+        selected_target: Path,
+        issue_file_count: int,
+        warning_file_count: int,
+    ) -> Path:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        has_serious_issues = issue_file_count > 0
+        if mode == "source":
+            base_name = "源视频严格验证问题清单" if has_serious_issues else "源视频严格验证警告报告"
+        else:
+            base_name = "AV1成品严格验证问题清单" if has_serious_issues else "AV1成品严格验证警告报告"
+        if target_kind == "file":
+            if mode == "source":
+                report_suffix = "源视频严格验证问题" if has_serious_issues else "源视频严格验证警告"
+            else:
+                report_suffix = "AV1成品严格验证问题" if has_serious_issues else "AV1成品严格验证警告"
+            report_name = f"{selected_target.name}.{report_suffix}.txt"
+            report_path = selected_target.parent / report_name
+        else:
+            report_name = f"{base_name}_{timestamp}.txt"
+            report_path = root / report_name
+        try:
+            test_path = root / f".__av1tool_report_test_{os.getpid()}"
+            test_path.write_bytes(b"ok")
+            test_path.unlink()
+        except OSError:
+            report_path = SCRIPT_DIR / report_name
+
+        if target_kind == "file":
+            if mode == "source":
+                report_title = "源视频严格验证问题" if has_serious_issues else "源视频严格验证警告"
+            else:
+                report_title = "AV1成品严格验证问题" if has_serious_issues else "AV1成品严格验证警告"
+        else:
+            report_title = base_name
+        lines = [
+            report_title,
+            "=" * 72,
+            f"生成时间：{datetime.now():%Y-%m-%d %H:%M:%S}",
+            (f"验证文件：{selected_target}" if target_kind == "file" else f"验证根目录：{root}"),
+            f"候选文件数：{len(candidates)}",
+            f"严重问题文件数：{issue_file_count}",
+            f"警告文件数：{warning_file_count}",
+            f"验证状态：{'用户中止，报告可能不完整' if stopped else '完整结束'}",
+            "",
+            "验证方式：",
+            "1. ffprobe -count_packets 完整遍历容器数据包并检查结构；",
+            "2. FFmpeg 使用 -err_detect explode、-max_error_rate 0 完整解码动态视频流和音频流；",
+            "   重复或非严格递增 DTS 单独列为时间戳警告，不再中断后续完整解码；",
+            "3. AV1 成品额外核对 Matroska、AV1 10-bit、Opus 和 AV1TOOL 来源标记。",
+            "",
+        ]
+        for number, finding in enumerate(findings, start=1):
+            lines.extend([
+                f"[{number}] {finding['relative']}",
+                f"完整路径：{finding['path']}",
+            ])
+            serious_text = finding.get("issues", "").strip()
+            warning_text = finding.get("warnings", "").strip()
+            if serious_text:
+                lines.append("严重问题：")
+                lines.extend(f"  {line}" for line in serious_text.splitlines())
+            if warning_text:
+                lines.append("警告：")
+                lines.extend(f"  {line}" for line in warning_text.splitlines())
+            lines.append("")
+        try:
+            report_path.write_text("\n".join(lines), encoding="utf-8-sig")
+        except OSError:
+            fallback = SCRIPT_DIR / report_name
+            if fallback == report_path:
+                raise
+            fallback.write_text("\n".join(lines), encoding="utf-8-sig")
+            report_path = fallback
+        return report_path
 
     def _choose_ffmpeg_path(self) -> None:
         path = filedialog.askopenfilename(
@@ -1412,6 +2586,9 @@ class AV1CompressorApp:
     def _start(self) -> None:
         if self.running:
             return
+        if self._extra_validation_is_running():
+            messagebox.showwarning("严格验证正在运行", "请先停止或等待额外功能中的严格验证完成。")
+            return
         if not self.sources:
             messagebox.showwarning("缺少输入", "请先添加视频文件或输入文件夹。")
             return
@@ -1452,6 +2629,7 @@ class AV1CompressorApp:
         self.start_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
         self.optional_button.configure(state=tk.DISABLED)
+        self.extra_features_button.configure(state=tk.DISABLED)
         self.current_progress["value"] = 0
         self.overall_progress["value"] = 0
         self.current_text.set("正在检查环境……")
@@ -1477,10 +2655,381 @@ class AV1CompressorApp:
         if not self.running:
             return
         self.stop_event.set()
-        self.log("收到停止请求，正在结束当前 FFmpeg 进程……", logging.WARNING)
+        self.log("收到停止请求，正在结束当前媒体工具进程……", logging.WARNING)
         self.current_text.set("正在停止……")
         self.current_detail_text.set("")
         threading.Thread(target=self._terminate_current_process, daemon=True).start()
+
+    def _log_resource_limit_warning_once(self, key: str, message: str) -> None:
+        """资源控制失败时只警告一次，避免批量 FFmpeg/ffprobe 子任务重复刷屏。"""
+        if key in self.resource_limit_warning_keys:
+            return
+        self.resource_limit_warning_keys.add(key)
+        self.log(message, logging.WARNING)
+
+    @staticmethod
+    def _windows_handle_to_int(handle: Any) -> Optional[int]:
+        """把 ctypes 返回的 HANDLE 安全转换成可长期保存的整数。
+
+        ``ctypes`` 在不同 Python/Windows 组合中可能把 HANDLE 返回为：
+        - 直接的 Python ``int``；
+        - 带 ``.value`` 的 ``c_void_p``；
+        - 空句柄 ``None``。
+
+        旧代码无条件访问 ``job_handle.value``，当返回值已经是 ``int`` 时会在
+        Windows API 调用成功之后抛出 AttributeError，导致程序误以为资源控制失败，
+        同时也无法正确保存和关闭 Job Object 句柄。
+        """
+        if handle is None:
+            return None
+        value = getattr(handle, "value", handle)
+        if value is None:
+            return None
+        try:
+            converted = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return converted if converted != 0 else None
+
+    @staticmethod
+    def _media_tool_label_from_process(process: subprocess.Popen[str]) -> str:
+        """根据子进程命令判断资源日志中应显示 FFmpeg 还是 ffprobe。"""
+        args = getattr(process, "args", None)
+        executable: Any = args[0] if isinstance(args, (list, tuple)) and args else args
+        name = Path(str(executable or "")).name.casefold()
+        return "ffprobe" if "ffprobe" in name else "FFmpeg"
+
+    def _apply_windows_resource_limits(
+        self,
+        process: subprocess.Popen[str],
+    ) -> Optional[int]:
+        """把进程优先级和 CPU 硬上限应用到刚启动的 FFmpeg 或 ffprobe，并读回验证。
+
+        这里不会修改媒体工具命令，也不向 SVT-AV1 自动加入 ``lp``：
+        - 优先级由 SetPriorityClass 调整；
+        - CPU 上限由独立 Job Object 的硬上限实现；
+        - AssignProcessToJobObject 成功后，必须再用 IsProcessInJob 确认进程归属；
+        - 必须用 QueryInformationJobObject 读回 ControlFlags 与 CpuRate，配置回显
+          不能再冒充“限制已经生效”；
+        - 任一 Windows API 调用失败都只记录警告并继续执行，不能让可选的资源
+          控制功能破坏无人值守批次。
+
+        返回值是必须保持到进程退出的 Job Object 句柄；没有启用或应用失败时返回 None。
+        """
+        if os.name != "nt":
+            return None
+
+        tool_label = self._media_tool_label_from_process(process)
+        tool_key = tool_label.casefold().replace(" ", "_").replace("/", "_")
+
+        try:
+            process_handle_value = int(getattr(process, "_handle"))
+        except (AttributeError, TypeError, ValueError):
+            self._log_resource_limit_warning_once(
+                f"{tool_key}_missing_process_handle",
+                f"无法取得 {tool_label} 的 Windows 进程句柄；本次不应用优先级和 CPU 硬上限。",
+            )
+            return None
+
+        process_handle = wintypes.HANDLE(process_handle_value)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        priority_name = str(self.settings.get("process_priority", "below_normal"))
+        priority_class = WINDOWS_PRIORITY_CLASSES.get(priority_name, WINDOWS_PRIORITY_CLASSES["below_normal"])
+        priority_label = PROCESS_PRIORITY_LABELS.get(priority_name, "低于正常")
+
+        # 设置并读回进程优先级。优先级失败不影响后续 CPU Job Object 尝试。
+        set_priority_class = kernel32.SetPriorityClass
+        set_priority_class.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        set_priority_class.restype = wintypes.BOOL
+        get_priority_class = kernel32.GetPriorityClass
+        get_priority_class.argtypes = [wintypes.HANDLE]
+        get_priority_class.restype = wintypes.DWORD
+
+        priority_confirmed = False
+        if not set_priority_class(process_handle, priority_class):
+            error_code = ctypes.get_last_error()
+            self._log_resource_limit_warning_once(
+                f"{tool_key}_priority_{error_code}",
+                f"无法设置 {tool_label} 进程优先级（Windows 错误 {error_code}）；继续使用系统默认优先级。",
+            )
+        else:
+            actual_priority = int(get_priority_class(process_handle))
+            priority_confirmed = actual_priority == priority_class
+            if not priority_confirmed:
+                error_code = ctypes.get_last_error()
+                self._log_resource_limit_warning_once(
+                    f"{tool_key}_priority_verify_{actual_priority}_{error_code}",
+                    f"{tool_label} 优先级读回值与请求不一致：请求={priority_label}，"
+                    f"实际类=0x{actual_priority:08X}；继续执行，但优先级未确认。",
+                )
+
+        if not bool(self.settings.get("cpu_limit_enabled", True)):
+            if priority_confirmed:
+                success_key = f"{tool_key}_{priority_name}_priority_only"
+                message = (
+                    f"{tool_label} 进程优先级已确认：PID={process.pid}，"
+                    f"优先级={priority_label}；CPU 硬上限关闭。"
+                )
+                if success_key not in self.resource_limit_success_keys:
+                    self.resource_limit_success_keys.add(success_key)
+                    self.log(message)
+                else:
+                    self.logger.debug(message)
+            return None
+
+        cpu_percent = int(self.settings.get("cpu_limit_percent", 70))
+        cpu_rate = min(max(cpu_percent, 10), 100) * 100
+
+        create_job_object = kernel32.CreateJobObjectW
+        create_job_object.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+        create_job_object.restype = wintypes.HANDLE
+        set_information_job_object = kernel32.SetInformationJobObject
+        set_information_job_object.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        set_information_job_object.restype = wintypes.BOOL
+        query_information_job_object = kernel32.QueryInformationJobObject
+        query_information_job_object.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        query_information_job_object.restype = wintypes.BOOL
+        assign_process_to_job_object = kernel32.AssignProcessToJobObject
+        assign_process_to_job_object.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        assign_process_to_job_object.restype = wintypes.BOOL
+        is_process_in_job = kernel32.IsProcessInJob
+        is_process_in_job.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+        is_process_in_job.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+
+        job_handle = create_job_object(None, None)
+        job_handle_value = self._windows_handle_to_int(job_handle)
+        if job_handle_value is None:
+            error_code = ctypes.get_last_error()
+            self._log_resource_limit_warning_once(
+                f"{tool_key}_create_job_{error_code}",
+                f"无法创建 {tool_label} CPU 限制作业对象（Windows 错误 {error_code}）；本次仅应用进程优先级。",
+            )
+            return None
+
+        info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION(
+            ControlFlags=(
+                JOB_OBJECT_CPU_RATE_CONTROL_ENABLE
+                | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP
+            ),
+            CpuRate=cpu_rate,
+        )
+        if not set_information_job_object(
+            job_handle,
+            JOB_OBJECT_CPU_RATE_CONTROL_INFORMATION_CLASS,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        ):
+            error_code = ctypes.get_last_error()
+            close_handle(job_handle)
+            self._log_resource_limit_warning_once(
+                f"{tool_key}_set_job_rate_{error_code}",
+                f"无法设置 {tool_label} CPU 硬上限（Windows 错误 {error_code}）；本次仅应用进程优先级。",
+            )
+            return None
+
+        if not assign_process_to_job_object(job_handle, process_handle):
+            error_code = ctypes.get_last_error()
+            close_handle(job_handle)
+            self._log_resource_limit_warning_once(
+                f"{tool_key}_assign_job_{error_code}",
+                f"无法把 {tool_label} 加入 CPU 限制作业对象（Windows 错误 {error_code}）；"
+                "可能受到上级 Job Object 限制，本次仅应用进程优先级。",
+            )
+            return None
+
+        # 第一步验证：当前媒体工具是否确实属于刚创建的 Job Object。
+        in_job = wintypes.BOOL(False)
+        if not is_process_in_job(process_handle, job_handle, ctypes.byref(in_job)):
+            error_code = ctypes.get_last_error()
+            self._log_resource_limit_warning_once(
+                f"{tool_key}_verify_membership_api_{error_code}",
+                f"无法验证 {tool_label} 是否已加入 CPU 限制作业对象（Windows 错误 {error_code}）；"
+                "限制可能已生效，但本次无法确认。",
+            )
+            return job_handle_value
+        if not bool(in_job.value):
+            close_handle(job_handle)
+            self._log_resource_limit_warning_once(
+                f"{tool_key}_verify_membership_false",
+                f"AssignProcessToJobObject 返回成功，但 IsProcessInJob 确认 {tool_label} 不属于该 Job；"
+                "本次 CPU 硬上限未生效。",
+            )
+            return None
+
+        # 第二步验证：读回 Job Object 的 CPU 控制标志和实际 CpuRate。
+        actual_info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION()
+        returned_length = wintypes.DWORD(0)
+        if not query_information_job_object(
+            job_handle,
+            JOB_OBJECT_CPU_RATE_CONTROL_INFORMATION_CLASS,
+            ctypes.byref(actual_info),
+            ctypes.sizeof(actual_info),
+            ctypes.byref(returned_length),
+        ):
+            error_code = ctypes.get_last_error()
+            self._log_resource_limit_warning_once(
+                f"{tool_key}_query_job_rate_{error_code}",
+                f"{tool_label} 已确认属于 CPU 限制作业对象，但无法读回 CPU 上限（Windows 错误 {error_code}）；"
+                "限制可能已生效，本次无法完整确认。",
+            )
+            return job_handle_value
+
+        required_flags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP
+        flags_confirmed = (int(actual_info.ControlFlags) & required_flags) == required_flags
+        rate_confirmed = int(actual_info.CpuRate) == cpu_rate
+        if not flags_confirmed or not rate_confirmed:
+            self._log_resource_limit_warning_once(
+                f"{tool_key}_job_rate_mismatch_{int(actual_info.ControlFlags)}_{int(actual_info.CpuRate)}",
+                f"{tool_label} 已加入 Job Object，但 CPU 上限读回值与请求不一致："
+                f"请求={cpu_percent}% / flags=0x{required_flags:X}，"
+                f"实际={int(actual_info.CpuRate) / 100:g}% / flags=0x{int(actual_info.ControlFlags):X}。",
+            )
+            return job_handle_value
+
+        priority_status = priority_label if priority_confirmed else f"{priority_label}（未确认）"
+        success_key = f"{tool_key}_{priority_name}_{int(actual_info.CpuRate)}"
+        success_message = (
+            f"{tool_label} 资源限制已确认应用：PID={process.pid}，优先级={priority_status}，"
+            f"CPU 硬上限={int(actual_info.CpuRate) / 100:g}%"
+            f"（ControlFlags=0x{int(actual_info.ControlFlags):X}）。"
+        )
+        if success_key not in self.resource_limit_success_keys:
+            self.resource_limit_success_keys.add(success_key)
+            self.log(success_message)
+        else:
+            self.logger.debug(success_message)
+        return job_handle_value
+
+    def _safe_apply_windows_resource_limits(
+        self,
+        process: subprocess.Popen[str],
+    ) -> Optional[int]:
+        """资源控制的最外层异常边界。
+
+        ctypes/Windows API 属于附加能力；即使未来某个 Windows 版本、运行容器或
+        安全软件让 API 调用出现未预料异常，也必须让 FFmpeg/ffprobe 本身继续运行。
+        """
+        try:
+            return self._apply_windows_resource_limits(process)
+        except Exception as exc:
+            tool_label = self._media_tool_label_from_process(process)
+            self.logger.exception("应用 %s 资源控制时出现内部异常", tool_label)
+            self._log_resource_limit_warning_once(
+                f"resource_internal_{tool_label}_{type(exc).__name__}",
+                f"应用 {tool_label} 资源控制时出现内部异常：{exc}；本次继续使用系统默认调度。",
+            )
+            return None
+
+    def _run_media_tool_sync(
+        self,
+        command: list[str],
+        *,
+        timeout_seconds: float,
+        combine_output: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        """同步运行短 FFmpeg/ffprobe 命令，同时应用统一资源控制。
+
+        ``subprocess.run`` 无法在子进程启动后插入 Job Object，因此启动检查和常规
+        ffprobe 也必须经过这个包装器。communicate 放在后台线程中，使停止按钮和
+        超时判断不会因为管道阻塞而失效。资源限制只影响调度速度，不修改命令参数。
+        """
+        stderr_target: Any = subprocess.STDOUT if combine_output else subprocess.PIPE
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=stderr_target,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **subprocess_options(),
+        )
+        job_handle = self._safe_apply_windows_resource_limits(process)
+        self._register_current_process(process, job_handle)
+
+        result_box: list[tuple[str, str]] = []
+        done = threading.Event()
+
+        def communicate() -> None:
+            try:
+                stdout_text, stderr_text = process.communicate()
+                result_box.append((stdout_text or "", stderr_text or ""))
+            finally:
+                done.set()
+
+        reader = threading.Thread(target=communicate, daemon=True)
+        reader.start()
+        started_at = time.monotonic()
+        try:
+            while not done.wait(0.2):
+                if self.stop_event.is_set():
+                    self._terminate_current_process()
+                    raise InterruptedError
+                if time.monotonic() - started_at > timeout_seconds:
+                    self._terminate_current_process()
+                    raise subprocess.TimeoutExpired(command, timeout_seconds)
+            reader.join(timeout=5)
+            stdout_text, stderr_text = result_box[-1] if result_box else ("", "")
+            return subprocess.CompletedProcess(
+                command,
+                process.returncode if process.returncode is not None else -1,
+                stdout_text,
+                stderr_text,
+            )
+        finally:
+            self._clear_current_process(process, job_handle)
+
+    @staticmethod
+    def _close_windows_job_handle(job_handle: Optional[int]) -> None:
+        """关闭已经结束的 FFmpeg 或 ffprobe 对应 Job Object 句柄。"""
+        if os.name != "nt" or not job_handle:
+            return
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [wintypes.HANDLE]
+            close_handle.restype = wintypes.BOOL
+            close_handle(wintypes.HANDLE(job_handle))
+        except (AttributeError, OSError):
+            # 进程已经结束，句柄清理失败不应影响任务结果。
+            pass
+
+    def _register_current_process(
+        self,
+        process: subprocess.Popen[str],
+        job_handle: Optional[int],
+    ) -> None:
+        """原子登记当前媒体工具进程及其 Job Object，供停止按钮和 finally 清理使用。"""
+        with self.process_lock:
+            self.current_process = process
+            self.current_job_handle = job_handle
+
+    def _clear_current_process(
+        self,
+        process: subprocess.Popen[str],
+        job_handle: Optional[int],
+    ) -> None:
+        """仅清理由本次调用登记的进程，防止未来并发改造时误清其他任务。"""
+        with self.process_lock:
+            if self.current_process is process:
+                self.current_process = None
+            if self.current_job_handle == job_handle:
+                self.current_job_handle = None
+        self._close_windows_job_handle(job_handle)
 
     def _terminate_current_process(self) -> None:
         with self.process_lock:
@@ -1950,30 +3499,20 @@ class AV1CompressorApp:
         if not self.ffmpeg or not self.ffprobe:
             raise RuntimeError("请先打开“设置”，选择 FFmpeg 和 ffprobe 的可执行文件。")
         for executable, name in ((self.ffmpeg, "FFmpeg"), (self.ffprobe, "ffprobe")):
-            result = subprocess.run(
+            result = self._run_media_tool_sync(
                 [executable, "-version"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=20,
-                **subprocess_options(),
+                timeout_seconds=20,
+                combine_output=True,
             )
             if result.returncode != 0:
                 raise RuntimeError(f"{name} 无法运行：{result.stdout.strip()}")
             first_line = result.stdout.splitlines()[0] if result.stdout else ""
             self.log(f"{name}：{first_line}")
 
-        encoder_result = subprocess.run(
+        encoder_result = self._run_media_tool_sync(
             [self.ffmpeg, "-hide_banner", "-encoders"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-            **subprocess_options(),
+            timeout_seconds=30,
+            combine_output=True,
         )
         encoder_text = encoder_result.stdout.lower()
         if "libsvtav1" not in encoder_text:
@@ -1981,28 +3520,18 @@ class AV1CompressorApp:
         if "libopus" not in encoder_text:
             raise RuntimeError("当前 FFmpeg 不包含 libopus 编码器。")
 
-        svt_help = subprocess.run(
+        svt_help = self._run_media_tool_sync(
             [self.ffmpeg, "-hide_banner", "-h", "encoder=libsvtav1"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-            **subprocess_options(),
+            timeout_seconds=30,
+            combine_output=True,
         ).stdout.lower()
         if "svtav1-params" not in svt_help:
             raise RuntimeError("当前 FFmpeg 的 libsvtav1 不支持 svtav1-params，请更换较新的完整构建。")
 
-        muxer_result = subprocess.run(
+        muxer_result = self._run_media_tool_sync(
             [self.ffmpeg, "-hide_banner", "-muxers"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-            **subprocess_options(),
+            timeout_seconds=30,
+            combine_output=True,
         )
         if "matroska" not in muxer_result.stdout.lower():
             raise RuntimeError("当前 FFmpeg 不包含 Matroska（MKV）封装器。")
@@ -2019,6 +3548,23 @@ class AV1CompressorApp:
         if free < 1024 * 1024 * 1024:
             raise RuntimeError(f"输出磁盘剩余空间不足 1 GB：{format_bytes(free)}")
 
+        priority_label = PROCESS_PRIORITY_LABELS.get(
+            str(self.settings.get("process_priority", "below_normal")),
+            "低于正常",
+        )
+        if os.name == "nt" and bool(self.settings.get("cpu_limit_enabled", True)):
+            self.log(
+                f"FFmpeg / ffprobe 资源控制配置：优先级={priority_label}，"
+                f"CPU 硬上限={int(self.settings.get('cpu_limit_percent', 70))}%；"
+                "实际是否生效将在媒体工具启动后由 Windows API 读回确认；普通编码不使用 lp 参数。"
+            )
+        elif os.name == "nt":
+            self.log(
+                f"FFmpeg / ffprobe 资源控制配置：优先级={priority_label}，CPU 硬上限=关闭；"
+                "实际优先级将在媒体工具启动后读回确认；普通编码不使用 lp 参数。"
+            )
+        else:
+            self.log("当前不是 Windows；FFmpeg / ffprobe 进程优先级和 Job Object CPU 硬上限不生效。", logging.WARNING)
         self.log("启动前检查通过。")
 
     # ---------- 扫描与探测 ----------
@@ -2172,15 +3718,10 @@ class AV1CompressorApp:
             "-show_chapters",
             str(path),
         ]
-        result = subprocess.run(
+        result = self._run_media_tool_sync(
             command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=120,
-            **subprocess_options(),
+            timeout_seconds=120,
+            combine_output=False,
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or "ffprobe 返回失败")
@@ -2218,11 +3759,17 @@ class AV1CompressorApp:
             and parse_int((s.get("disposition") or {}).get("attached_pic"), 0) == 1
         ]
         if attached_pictures:
-            self.log(
-                f"跳过 {path.name}：包含 attached_pic 封面流；为避免封面在 MKV 中被错误处理，不自动压制。",
-                logging.WARNING,
+            # attached_pic 是容器中的静态封面/缩略图，不是需要转码的动态视频。
+            # 旧版为了避免映射错误而跳过整个文件，导致带封面的正常视频无法进入队列。
+            # 当前策略是：仅选择 attached_pic=0 的唯一主视频流，并明确忽略全部封面流。
+            cover_indexes_text = ", ".join(
+                str(parse_int(stream.get("index"), -1)) for stream in attached_pictures
             )
-            return None
+            self.log(
+                f"检测到 {len(attached_pictures)} 个 attached_pic 内嵌封面流"
+                f"（索引：{cover_indexes_text}），将忽略封面并继续压制主视频：{path.name}",
+                logging.INFO,
+            )
         video_codec = str(video.get("codec_name", "unknown")).lower()
         if video_codec == "av1":
             self.log(f"跳过 {path.name}：源视频已经是 AV1，避免再次有损压制。")
@@ -2343,7 +3890,8 @@ class AV1CompressorApp:
             subtitle_indexes=[parse_int(s.get("index")) for s in subtitle_streams],
             subtitle_codecs=[str(s.get("codec_name", "unknown")).lower() for s in subtitle_streams],
             attachment_indexes=[parse_int(s.get("index")) for s in attachment_streams],
-            cover_indexes=[parse_int(s.get("index")) for s in attached_pictures],
+            # 封面流属于非必要静态元数据，输出策略统一忽略，不参与映射和验证。
+            cover_indexes=[],
             input_size=stat.st_size,
             input_mtime_ns=stat.st_mtime_ns,
             source_fingerprint=source_fingerprint,
@@ -2715,8 +4263,8 @@ class AV1CompressorApp:
             bufsize=1,
             **subprocess_options(),
         )
-        with self.process_lock:
-            self.current_process = process
+        job_handle = self._safe_apply_windows_resource_limits(process)
+        self._register_current_process(process, job_handle)
 
         stderr_thread = threading.Thread(
             target=self._collect_stderr,
@@ -2835,8 +4383,7 @@ class AV1CompressorApp:
                 # 让卡死被误判为成功。
                 return_code = -1
         finally:
-            with self.process_lock:
-                self.current_process = None
+            self._clear_current_process(process, job_handle)
 
         stderr_text = "\n".join(stderr_lines)
         if stderr_text:
@@ -2862,8 +4409,8 @@ class AV1CompressorApp:
             errors="replace",
             **subprocess_options(),
         )
-        with self.process_lock:
-            self.current_process = process
+        job_handle = self._safe_apply_windows_resource_limits(process)
+        self._register_current_process(process, job_handle)
 
         stderr_thread = threading.Thread(
             target=self._collect_stderr,
@@ -2895,8 +4442,7 @@ class AV1CompressorApp:
             if timed_out and return_code == 0:
                 return_code = -1
         finally:
-            with self.process_lock:
-                self.current_process = None
+            self._clear_current_process(process, job_handle)
 
         stderr_text = "\n".join(stderr_lines)
         if stderr_text:
@@ -2919,8 +4465,6 @@ class AV1CompressorApp:
         for index in task.subtitle_indexes:
             command += ["-map", f"0:{index}"]
         for index in task.attachment_indexes:
-            command += ["-map", f"0:{index}"]
-        for index in task.cover_indexes:
             command += ["-map", f"0:{index}"]
 
         command += [
@@ -3320,7 +4864,6 @@ class AV1CompressorApp:
                 "发现非 opus",
                 "字幕数量变化",
                 "附件数量变化",
-                "封面流数量变化",
                 "章节数量变化",
                 "hdr 标记未保持",
                 "hdr 静态元数据未保持",
@@ -3898,8 +5441,6 @@ class AV1CompressorApp:
             command += ["-map", f"0:{index}"]
         for index in task.attachment_indexes:
             command += ["-map", f"0:{index}"]
-        for index in task.cover_indexes:
-            command += ["-map", f"0:{index}"]
 
         command += [
             "-map_metadata", "0",
@@ -3948,8 +5489,6 @@ class AV1CompressorApp:
 
         if task.attachment_indexes:
             command += ["-c:t", "copy"]
-        for cover_output_index, _ in enumerate(task.cover_indexes, start=1):
-            command += [f"-c:v:{cover_output_index}", "copy"]
 
         command += [
             "-metadata", f"AV1TOOL_SOURCE_SIZE={task.input_size}",
@@ -4292,13 +5831,8 @@ class AV1CompressorApp:
         if attachment_count != len(task.attachment_indexes):
             return False, f"附件数量变化：{len(task.attachment_indexes)} -> {attachment_count}"
 
-        cover_count = sum(
-            1 for s in streams
-            if s.get("codec_type") == "video"
-            and parse_int((s.get("disposition") or {}).get("attached_pic"), 0) == 1
-        )
-        if cover_count != len(task.cover_indexes):
-            return False, f"封面流数量变化：{len(task.cover_indexes)} -> {cover_count}"
+        # attached_pic 封面流不是归档成品的必要内容。
+        # 新生成文件会主动忽略封面；已有成品即使保留或缺少封面，也不应因此判定无效。
 
         output_chapter_count = len(probe.get("chapters") or [])
         if task.chapter_count != output_chapter_count:
@@ -4365,8 +5899,8 @@ class AV1CompressorApp:
         except OSError as exc:
             return False, f"无法启动完整解码验证：{exc}"
 
-        with self.process_lock:
-            self.current_process = process
+        job_handle = self._safe_apply_windows_resource_limits(process)
+        self._register_current_process(process, job_handle)
 
         stderr_lines: list[str] = []
         stderr_thread = threading.Thread(
@@ -4498,8 +6032,7 @@ class AV1CompressorApp:
             self.logger.exception("完整解码验证内部异常：%s", path)
             raise RuntimeError(f"完整解码验证内部异常：{exc}") from exc
         finally:
-            with self.process_lock:
-                self.current_process = None
+            self._clear_current_process(process, job_handle)
 
     # ---------- 原文件移动、无收益记录与状态恢复 ----------
 
@@ -4969,6 +6502,68 @@ class AV1CompressorApp:
                         f"{completed} / {total} | {total_fraction * 100:.1f}% | "
                         f"预计剩余 {format_duration(overall_eta)}"
                     )
+                elif kind == "extra_validation_progress":
+                    completed, total, path = payload
+                    if hasattr(self, "extra_validation_progress"):
+                        percent = (completed / max(total, 1)) * 100.0
+                        self.extra_validation_progress["value"] = percent
+                        self.extra_validation_status_var.set(f"已检查 {completed} / {total}（{percent:.1f}%）")
+                        self.extra_validation_current_var.set(str(path))
+                elif kind == "extra_validation_log":
+                    self._append_extra_validation_log(str(payload))
+                elif kind == "extra_validation_done":
+                    self.extra_validation_worker = None
+                    self._set_extra_validation_running(False)
+                    stopped = bool(payload.get("stopped"))
+                    issue_count = int(payload.get("issues", 0))
+                    warning_count = int(payload.get("warnings", 0))
+                    report = str(payload.get("report", ""))
+                    if hasattr(self, "extra_validation_status_var"):
+                        if stopped:
+                            self.extra_validation_status_var.set("验证已停止")
+                        elif issue_count:
+                            self.extra_validation_status_var.set(
+                                f"验证完成：严重问题 {issue_count} 个，警告 {warning_count} 个"
+                            )
+                        elif warning_count:
+                            self.extra_validation_status_var.set(f"验证完成：发现 {warning_count} 个警告文件")
+                        else:
+                            self.extra_validation_status_var.set("验证完成：未发现问题")
+                        self.extra_validation_current_var.set(report if report else "未生成验证报告")
+                    if stopped:
+                        self._append_extra_validation_log("验证已由用户停止。")
+                    elif (issue_count or warning_count) and report:
+                        report_label = "问题清单" if issue_count else "警告报告"
+                        self._append_extra_validation_log(f"{report_label}已生成：{report}")
+                        if self.extra_features_window is not None and self.extra_features_window.winfo_exists():
+                            if issue_count:
+                                message = (
+                                    f"发现 {issue_count} 个严重问题文件、{warning_count} 个警告文件。"
+                                    f"\n\n问题清单：\n{report}"
+                                )
+                            else:
+                                message = (
+                                    f"未发现严重解码问题，但发现 {warning_count} 个时间戳警告文件。"
+                                    f"\n\n警告报告：\n{report}"
+                                )
+                            messagebox.showwarning("严格验证完成", message, parent=self.extra_features_window)
+                    else:
+                        self._append_extra_validation_log("全部文件通过；未发现严重问题或警告，按设计未创建报告文件。")
+                        if self.extra_features_window is not None and self.extra_features_window.winfo_exists():
+                            messagebox.showinfo(
+                                "严格验证完成",
+                                "全部文件通过；未发现严重问题或警告，未创建报告文件。",
+                                parent=self.extra_features_window,
+                            )
+                elif kind == "extra_validation_failed":
+                    self.extra_validation_worker = None
+                    self._set_extra_validation_running(False)
+                    if hasattr(self, "extra_validation_status_var"):
+                        self.extra_validation_status_var.set("验证异常中止")
+                        self.extra_validation_current_var.set(str(payload))
+                    self._append_extra_validation_log(f"验证异常中止：{payload}")
+                    if self.extra_features_window is not None and self.extra_features_window.winfo_exists():
+                        messagebox.showerror("严格验证失败", str(payload), parent=self.extra_features_window)
                 elif kind == "finished":
                     self._set_idle()
                     self.current_progress["value"] = 100
@@ -5003,6 +6598,7 @@ class AV1CompressorApp:
         self.start_button.configure(state=tk.NORMAL)
         self.stop_button.configure(state=tk.DISABLED)
         self.optional_button.configure(state=tk.NORMAL)
+        self.extra_features_button.configure(state=tk.NORMAL)
         self.worker = None
 
     def _safe_unlink(self, path: Path) -> None:
@@ -5013,11 +6609,15 @@ class AV1CompressorApp:
             self.logger.exception("删除文件失败：%s", path)
 
     def _on_close(self) -> None:
-        if self.running:
-            if not messagebox.askyesno("退出", "当前任务仍在运行。确定停止并退出吗？"):
+        if self.running or self._extra_validation_is_running():
+            if not messagebox.askyesno("退出", "当前压制或严格验证仍在运行。确定停止并退出吗？"):
                 return
-            self.stop_event.set()
-            self._terminate_current_process()
+            if self.running:
+                self.stop_event.set()
+                self._terminate_current_process()
+            if self._extra_validation_is_running():
+                self.extra_validation_stop_event.set()
+                self._terminate_extra_validation_process()
         self._persist_settings()
         self.logger.info("程序关闭")
         self.root.destroy()
