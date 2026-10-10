@@ -1,0 +1,10 @@
+// Resource.rc 是 Windows 资源编译脚本。
+// 它不会执行程序逻辑，而是告诉 rc.exe / windres：
+// “把哪些图片、图标、版本信息等二进制资源打包进最终 EXE”。
+
+#include "Resource.h"
+
+// 把 config/AppIcon.ico 作为 IDI_APP_ICON 嵌入 EXE。
+// 路径相对于本 Resource.rc 所在的 src 目录，因此先返回工程根目录，再进入 config。
+// AppIcon.ico 本身包含 16~256 像素多个尺寸，Windows 会按任务栏、标题栏、资源管理器等场景自动选尺寸。
+IDI_APP_ICON ICON "../config/AppIcon.ico"
