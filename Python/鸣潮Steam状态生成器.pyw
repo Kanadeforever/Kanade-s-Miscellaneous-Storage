@@ -34,7 +34,7 @@ except ImportError:
 # ============================================================================
 
 APP_TITLE = "鸣潮 Steam 状态生成器"
-APP_VERSION = "1.0"
+APP_VERSION = "1.1"
 
 TARGET_APP_ID = "3513350"
 TARGET_DEPOT_ID = "3513351"
@@ -305,6 +305,14 @@ CONFIG_SCHEMA: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         ),
     ),
     (
+        "UseUhd",
+        "1",
+        (
+            "是否在 Steam 启动选项中加入 -krqlv=uhd。",
+            "0 表示不加入；1 表示启用极致画质，默认开启。",
+        ),
+    ),
+    (
         "LastBuildId",
         "",
         (
@@ -333,8 +341,8 @@ CONFIG_SCHEMA: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 CONFIG_DEFAULTS = {key: default for key, default, _ in CONFIG_SCHEMA}
 CONFIG_KEYS = frozenset(CONFIG_DEFAULTS)
 
-# Lite.2 使用中文节名和中文键。新版本只在新的英文配置文件不存在时尝试迁移，
-# 迁移完成后不会删除旧文件，便于用户回退旧版本或手工核对设置。
+# 兼容使用中文节名和中文键的配置文件。只有主配置不存在时才尝试迁移，
+# 迁移后保留来源文件，以便用户核对配置与手动恢复数据。
 LEGACY_CONFIG_FILENAMES = ("鸣潮Steam状态生成器_轻量版.ini",)
 LEGACY_CONFIG_SECTION = "设置"
 LEGACY_CONFIG_KEY_MAP = {
@@ -360,7 +368,7 @@ class PortableConfig:
         1. 对外只暴露英文键，避免 GUI 和业务逻辑继续依赖旧中文键名。
         2. 保存时按固定架构重写整份 INI，确保详细中文注释始终存在。
         3. 使用同目录临时文件、fsync 和 os.replace，避免程序中断后留下半份配置。
-        4. 首次运行新版本时可读取 Lite.2 的旧中文配置，但不会修改或删除旧文件。
+        4. 主配置尚不存在时，可以读取中文键格式的兼容配置，但不修改来源文件。
     """
 
     def __init__(
@@ -417,7 +425,7 @@ class PortableConfig:
         return True
 
     def _load_legacy_config(self) -> bool:
-        """在新配置不存在时迁移 Lite.2 中文键；旧文件始终保留。"""
+        """在主配置不存在时迁移兼容的中文配置键；来源文件始终保留。"""
         for legacy_path in self.legacy_paths:
             if not legacy_path.is_file():
                 continue
@@ -480,7 +488,8 @@ class PortableConfig:
             value = self.values.get(key, default)
             lines.append(f"{key}={self._sanitize_value(value)}")
         lines.append("")
-        return "\n".join(lines)
+        # 统一生成 Windows CRLF 换行，便于用户直接编辑便携 INI。
+        return "\r\n".join(lines)
 
     def save(self) -> None:
         """
@@ -1310,14 +1319,22 @@ def validate_client_executable(path_text: str, must_exist: bool = True) -> Path:
     return path
 
 
-def build_launch_option(exe_path: Path, use_dx11: bool, skip_splash: bool) -> str:
-    """根据两个复选框组合生成唯一一条 Steam 启动命令。"""
+def build_launch_option(
+    exe_path: Path,
+    use_dx11: bool,
+    skip_splash: bool,
+    use_uhd: bool = True,
+) -> str:
+    """根据独立参数开关组合 Steam 启动命令，保留原有的命令尾部占位符。"""
     quoted = f'"{to_windows_path_string(exe_path)}"'
     args: list[str] = []
     if use_dx11:
         args.append("-dx11")
     if skip_splash:
         args.append("-SkipSplash")
+    # 极致画质参数和原有可选参数一样，必须置于 Steam 占位符之前。
+    if use_uhd:
+        args.append("-krqlv=uhd")
     args.append("%command%")
     return f"{quoted} {' '.join(args)}"
 
@@ -1376,6 +1393,7 @@ class MainWindow:
         self.skip_splash_var = tk.BooleanVar(
             value=self.config.get_bool("SkipSplash", False)
         )
+        self.uhd_var = tk.BooleanVar(value=self.config.get_bool("UseUhd", True))
 
         self.build_var = tk.StringVar(value=self.config.get("LastBuildId") or "尚未获取")
         self.manifest_var = tk.StringVar(
@@ -1411,6 +1429,7 @@ class MainWindow:
         self.client_exe_var.trace_add("write", lambda *_: self._refresh_launch_option())
         self.dx11_var.trace_add("write", lambda *_: self._on_launch_option_flags_changed())
         self.skip_splash_var.trace_add("write", lambda *_: self._on_launch_option_flags_changed())
+        self.uhd_var.trace_add("write", lambda *_: self._on_launch_option_flags_changed())
         self.enable_launch_var.trace_add("write", lambda *_: self._on_launch_options_enabled_changed())
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -1430,7 +1449,7 @@ class MainWindow:
         style.configure("Primary.TButton", font=("Microsoft YaHei UI", 10, "bold"), padding=(10, 7))
 
     def _create_ui(self) -> None:
-        """创建双标签页主框架；窗口尺寸与 Lite.1 保持一致。"""
+        """创建双标签页主框架，使用固定基准尺寸实现紧凑窗口布局。"""
         outer = ttk.Frame(self.root, padding=10)
         outer.pack(fill="both", expand=True)
         outer.columnconfigure(0, weight=1)
@@ -1533,7 +1552,7 @@ class MainWindow:
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
     def _create_launch_options_tab(self) -> None:
-        """创建国服客户端路径、参数复选框和单行启动命令区域。"""
+        """创建国服客户端路径、三个独立参数开关和启动命令区域。"""
         tab = self.launch_tab
         tab.columnconfigure(1, weight=1)
 
@@ -1556,6 +1575,11 @@ class MainWindow:
             options,
             text="跳过 LOGO（-SkipSplash）",
             variable=self.skip_splash_var,
+        ).pack(side="left", padx=(0, 18))
+        ttk.Checkbutton(
+            options,
+            text="极致画质（-krqlv=uhd）",
+            variable=self.uhd_var,
         ).pack(side="left")
 
         ttk.Label(tab, text="最终启动选项：").grid(
@@ -1570,7 +1594,7 @@ class MainWindow:
 
         note = (
             "将生成的一条命令复制到 Steam 游戏属性中的“启动选项”。"
-            "两个参数可独立选择，也可以同时启用。"
+            "三个参数均可独立选择；极致画质默认启用。"
         )
         ttk.Label(tab, text=note, wraplength=620).grid(
             row=3, column=0, columnspan=3, sticky="w", pady=(8, 0)
@@ -1603,7 +1627,7 @@ class MainWindow:
         self._save_current_config(show_error=False)
 
     def _refresh_path_mode_ui(self) -> None:
-        """只改变标签和说明文字，不改变 Lite.1 的紧凑布局结构。"""
+        """只切换路径模式的标签和说明文字，不改变现有控件布局。"""
         manual = bool(self.manual_mode_var.get())
         if manual:
             self.path_label.configure(text="ACF 保存目录：")
@@ -1625,7 +1649,7 @@ class MainWindow:
             )
 
     def _auto_detect_steam_environment(self, log_detection: bool = False) -> None:
-        """默认模式下按 v3.2 主线方式检测 Steam.exe 和所有库目录。"""
+        """按保存路径、注册表和 Steam 的库文件检测主程序与全部库目录。"""
         detected = detect_steam_executable(self.steam_exe_var.get())
         if detected is None:
             self.path_combo["values"] = []
@@ -1755,7 +1779,7 @@ class MainWindow:
         self._save_current_config(show_error=False)
 
     def _on_launch_option_flags_changed(self) -> None:
-        """DX11 或跳过 LOGO 状态改变时重新生成唯一一条启动命令。"""
+        """任一启动参数开关改变时立即刷新命令并保存配置。"""
         self._refresh_launch_option()
         self._save_current_config(show_error=False)
 
@@ -1775,6 +1799,7 @@ class MainWindow:
                 path,
                 use_dx11=bool(self.dx11_var.get()),
                 skip_splash=bool(self.skip_splash_var.get()),
+                use_uhd=bool(self.uhd_var.get()),
             )
         except ValueError:
             command = ""
@@ -1847,6 +1872,7 @@ class MainWindow:
         self.config.set("ClientExecutablePath", self.client_exe_var.get().strip())
         self.config.set("UseDx11", "1" if self.dx11_var.get() else "0")
         self.config.set("SkipSplash", "1" if self.skip_splash_var.get() else "0")
+        self.config.set("UseUhd", "1" if self.uhd_var.get() else "0")
         try:
             self.config.save()
         except OSError as exc:
@@ -2196,12 +2222,28 @@ def _run_self_test() -> None:
     )
 
     command_path = Path("H:/Game/Client-Win64-Shipping.exe")
+    # 默认启用极致画质；显式关闭时不能向命令中添加该参数。
     assert build_launch_option(command_path, False, False).endswith(
+        'Client-Win64-Shipping.exe" -krqlv=uhd %command%'
+    )
+    assert build_launch_option(command_path, False, False, False).endswith(
         'Client-Win64-Shipping.exe" %command%'
     )
     assert "-dx11" in build_launch_option(command_path, True, False)
     assert "-SkipSplash" in build_launch_option(command_path, False, True)
     assert "-dx11 -SkipSplash" in build_launch_option(command_path, True, True)
+    assert build_launch_option(command_path, True, True, True).endswith(
+        'Client-Win64-Shipping.exe" -dx11 -SkipSplash -krqlv=uhd %command%'
+    )
+    for dx11 in (False, True):
+        for splash in (False, True):
+            for uhd in (False, True):
+                command = build_launch_option(command_path, dx11, splash, uhd)
+                assert command.count("%command%") == 1
+                assert command.endswith("%command%")
+                assert ("-dx11" in command) == dx11
+                assert ("-SkipSplash" in command) == splash
+                assert ("-krqlv=uhd" in command) == uhd
 
     with tempfile.TemporaryDirectory() as temp_dir:
         base = Path(temp_dir)
@@ -2278,11 +2320,14 @@ def _run_self_test() -> None:
         config.set("ManualPathMode", "1")
         config.set("CustomAcfOutputDirectory", str(arbitrary))
         config.set("UseDx11", "1")
+        config.set("UseUhd", "0")
         config.save()
         config_text = config_path.read_text(encoding="utf-8")
         assert "[Settings]" in config_text
         assert "ManualPathMode=1" in config_text
         assert "CustomAcfOutputDirectory=" in config_text
+        assert "UseUhd=0" in config_text
+        assert "; 是否在 Steam 启动选项中加入 -krqlv=uhd。" in config_text
         assert "; 路径模式开关。" in config_text
         assert "; 国服 Client-Win64-Shipping.exe 的完整路径。" in config_text
         assert "[设置]" not in config_text
@@ -2292,6 +2337,7 @@ def _run_self_test() -> None:
         assert reloaded.get_bool("ManualPathMode")
         assert reloaded.get("CustomAcfOutputDirectory") == str(arbitrary)
         assert reloaded.get_bool("UseDx11")
+        assert not reloaded.get_bool("UseUhd")
         reloaded.save()
         assert "; 路径模式开关。" in config_path.read_text(encoding="utf-8")
         try:
@@ -2301,7 +2347,7 @@ def _run_self_test() -> None:
         else:
             raise AssertionError("未知配置键必须被拒绝。")
 
-        # 验证 Lite.2 中文键可以迁移到新英文键，但旧文件不会被删除。
+        # 验证兼容的中文配置键能迁移到英文配置键，且保留来源文件。
         legacy_path = base / "legacy.ini"
         legacy_path.write_text(
             "[设置]\n"
@@ -2316,6 +2362,7 @@ def _run_self_test() -> None:
         assert migrated.get_bool("ManualPathMode")
         assert migrated.get("CustomAcfOutputDirectory") == str(arbitrary)
         assert migrated.get_bool("UseDx11")
+        assert migrated.get_bool("UseUhd")  # 旧配置未定义此项时使用默认开启的策略。
         migrated.save()
         assert legacy_path.is_file()
         assert "ManualPathMode=1" in migrated_path.read_text(encoding="utf-8")
@@ -2352,7 +2399,9 @@ def _run_self_test() -> None:
     assert "启用 Steam 启动项生成" in source
     removed_fourth_key = "DX11" + "并跳过LOGO"
     assert removed_fourth_key not in source
-    assert "def build_launch_option(exe_path: Path, use_dx11: bool, skip_splash: bool)" in source
+    assert "def build_launch_option(" in source
+    assert '"UseUhd",' in source
+    assert "极致画质（-krqlv=uhd）" in source
 
     print("自检通过")
 
